@@ -356,7 +356,7 @@ payload = {
 - Memory-maps the 3.8GB parquet file; row groups are decoded only when sampled
 - Memory usage: ~50MB (vs 192GB if loaded in-memory)
 - One dependency instead of two — no SQL engine needed for a single-table lookup
-- **~214× faster than the previous DuckDB approach.** `LIMIT 1 OFFSET n` combined
+- **~214× faster than previous design.** `LIMIT 1 OFFSET n` combined
   with `WHERE gender = ?` forced a scan of up to 554M rows per query, measured at
   **686ms median / 1.26s p95**. Row group sampling avoids the scan entirely: **2.78ms**.
 
