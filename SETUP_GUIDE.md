@@ -46,7 +46,7 @@ sudo apt install git-lfs
 git lfs install
 
 # Clone repository
-git clone <repo-url> limina-postprocessor
+git clone https://github.com/privateai/limina-postprocessor.git limina-postprocessor
 cd limina-postprocessor
 
 # Verify dictionary was downloaded (should be ~3.8GB, not a few KB)
