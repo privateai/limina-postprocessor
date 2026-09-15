@@ -2,6 +2,7 @@
 """Name entity handler for replacing name entities by sampling parquet row groups."""
 
 import random
+import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from pathlib import Path
@@ -89,15 +90,42 @@ class NameHandler(BaseEntityHandler):
         for row_group in range(metadata.num_row_groups):
             stats = metadata.row_group(row_group).column(gender_col).statistics
 
-            # A single-valued row group needs no filtering; anything else (mixed, or
-            # missing statistics) can hold either gender and is filtered after reading
+            # A single-valued row group needs no filtering; anything else (mixed,
+            # unrecognized, or missing statistics) can hold either gender and is
+            # filtered after reading
+            single = None
             if stats is not None and stats.min == stats.max:
-                if stats.min in self.row_groups:
-                    self.row_groups[stats.min].append(row_group)
+                single = self._stat_str(stats.min)
+
+            if single in self.row_groups:
+                self.row_groups[single].append(row_group)
             else:
                 self.mixed_row_groups.add(row_group)
                 self.row_groups['male'].append(row_group)
                 self.row_groups['female'].append(row_group)
+
+        # An empty pool means no row group was recognized, so every replacement
+        # would fail later inside random.choice(). Fail here instead, with the
+        # values that were actually seen.
+        empty = [gender for gender, groups in self.row_groups.items() if not groups]
+        if empty:
+            sample = metadata.row_group(0).column(gender_col).statistics
+            raise RuntimeError(
+                f"No row groups available for {empty} in {self.dictionary_path}. "
+                f"Expected the 'gender' column to contain 'male'/'female'; row group 0 "
+                f"reported min={getattr(sample, 'min', None)!r} "
+                f"max={getattr(sample, 'max', None)!r} "
+                f"across {metadata.num_row_groups} row groups (pyarrow {pa.__version__})."
+            )
+
+    @staticmethod
+    def _stat_str(value):
+        """Normalize a parquet statistic to str.
+
+        pyarrow returns BYTE_ARRAY statistics as bytes on some versions and str on
+        others, so comparisons against str keys must not depend on which is in use.
+        """
+        return value.decode('utf-8', 'replace') if isinstance(value, bytes) else value
 
     def can_handle(self, entity_type: str) -> bool:
         """Check if this is a name entity."""
@@ -203,16 +231,48 @@ class NameHandler(BaseEntityHandler):
         return self._match_capitalization(original_text, fallback)
 
     def _sample_row_group(self, gender: str, column: str):
-        """Decode one random row group, returning its values of `column` for `gender`."""
-        row_group = random.choice(self.row_groups[gender])
+        """Decode one random row group, returning its values of `column` for `gender`.
 
-        if row_group not in self.mixed_row_groups:
-            table = self.parquet.read_row_group(row_group, columns=[column])
-        else:
+        Row groups that statistics could not resolve to a single gender are filtered
+        after reading. Each such read also teaches us what the row group really holds,
+        and the index is corrected accordingly, so the filtering cost fades as row
+        groups are visited. Never returns an empty result.
+        """
+        other = 'female' if gender == 'male' else 'male'
+
+        while self.row_groups[gender]:
+            row_group = random.choice(self.row_groups[gender])
+
+            if row_group not in self.mixed_row_groups:
+                table = self.parquet.read_row_group(row_group, columns=[column])
+                return table.column(column)
+
             table = self.parquet.read_row_group(row_group, columns=[column, 'gender'])
+            total_rows = table.num_rows
             table = table.filter(pc.equal(table.column('gender'), gender))
 
-        return table.column(column)
+            if table.num_rows == 0:
+                # Holds none of this gender, so stop offering it for this gender
+                self._drop_row_group(row_group, gender)
+                continue
+
+            if table.num_rows == total_rows:
+                # Holds only this gender, so it never needs filtering again
+                self.mixed_row_groups.discard(row_group)
+                self._drop_row_group(row_group, other)
+
+            return table.column(column)
+
+        raise RuntimeError(
+            f"No {gender} names available in {self.dictionary_path}"
+        )
+
+    def _drop_row_group(self, row_group: int, gender: str):
+        """Remove a row group from a gender's pool once it is known not to apply."""
+        try:
+            self.row_groups[gender].remove(row_group)
+        except ValueError:
+            pass
 
     def _split_title(self, name: str) -> tuple:
         """Split a leading honorific off a name, returning (title, remaining_name).
