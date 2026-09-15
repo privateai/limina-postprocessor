@@ -1,0 +1,75 @@
+[
+  {
+    "processed_text": "Dr. Rodriguez Stratton-Sueda treated patient Richard O'Connor at Riverside Medical Center located at 789 Pine Street. Mr. O'Connor's primary care physician, Dr. David Ann Li., provided the referral. The consultation lasted 45 minutes.",
+    "entities": [
+      {
+        "processed_text": "Rodriguez Stratton-Sueda",
+        "text": "Elizabeth Johnson-Smith",
+        "location": {
+          "stt_idx": 4,
+          "end_idx": 27,
+          "stt_idx_processed": 4,
+          "end_idx_processed": 28
+        },
+        "best_label": "NAME",
+        "labels": {
+          "NAME": 0.9138,
+          "NAME_FAMILY": 0.5108,
+          "NAME_GIVEN": 0.3565
+        }
+      },
+      {
+        "processed_text": "Richard O'Connor",
+        "text": "Michael O'Brien",
+        "location": {
+          "stt_idx": 44,
+          "end_idx": 59,
+          "stt_idx_processed": 45,
+          "end_idx_processed": 61
+        },
+        "best_label": "NAME",
+        "labels": {
+          "NAME": 0.9015,
+          "NAME_GIVEN": 0.4195,
+          "NAME_FAMILY": 0.4211
+        }
+      },
+      {
+        "processed_text": "O'Connor",
+        "text": "O'Brien",
+        "location": {
+          "stt_idx": 120,
+          "end_idx": 127,
+          "stt_idx_processed": 122,
+          "end_idx_processed": 130
+        },
+        "best_label": "NAME_FAMILY",
+        "labels": {
+          "NAME": 0.9014,
+          "NAME_FAMILY": 0.8993
+        }
+      },
+      {
+        "processed_text": "David Ann Li",
+        "text": "James Lee Jr",
+        "location": {
+          "stt_idx": 158,
+          "end_idx": 170,
+          "stt_idx_processed": 161,
+          "end_idx_processed": 173
+        },
+        "best_label": "NAME",
+        "labels": {
+          "NAME_GIVEN": 0.3789,
+          "NAME_FAMILY": 0.2837,
+          "NAME": 0.894
+        }
+      }
+    ],
+    "entities_present": true,
+    "languages_detected": {
+      "en": 0.9019557237625122
+    },
+    "characters_processed": 231
+  }
+]

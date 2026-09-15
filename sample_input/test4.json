@@ -1,0 +1,105 @@
+[
+  {
+    "processed_text": "Mrs. Quinn Clements visited the clinic with her daughter Demetri Sullivan. Dr. Maria Garrison examined Mrs. Clements and found nothing concerning. Miss Clements was also seen by Dr. Garrison for a routine checkup.",
+    "entities": [
+      {
+        "processed_text": "Quinn Clements",
+        "text": "Linda Martinez",
+        "location": {
+          "stt_idx": 5,
+          "end_idx": 19,
+          "stt_idx_processed": 5,
+          "end_idx_processed": 19
+        },
+        "best_label": "NAME",
+        "labels": {
+          "NAME": 0.9017,
+          "NAME_FAMILY": 0.5096,
+          "NAME_GIVEN": 0.3133
+        }
+      },
+      {
+        "processed_text": "Demetri Sullivan",
+        "text": "Sofia Martinez",
+        "location": {
+          "stt_idx": 57,
+          "end_idx": 71,
+          "stt_idx_processed": 57,
+          "end_idx_processed": 73
+        },
+        "best_label": "NAME",
+        "labels": {
+          "NAME": 0.9032,
+          "NAME_FAMILY": 0.5158,
+          "NAME_GIVEN": 0.3178
+        }
+      },
+      {
+        "processed_text": "Maria Garrison",
+        "text": "Karen Thompson",
+        "location": {
+          "stt_idx": 77,
+          "end_idx": 91,
+          "stt_idx_processed": 79,
+          "end_idx_processed": 93
+        },
+        "best_label": "NAME",
+        "labels": {
+          "NAME_GIVEN": 0.3166,
+          "NAME": 0.9062,
+          "NAME_FAMILY": 0.5202
+        }
+      },
+      {
+        "processed_text": "Clements",
+        "text": "Martinez",
+        "location": {
+          "stt_idx": 106,
+          "end_idx": 114,
+          "stt_idx_processed": 108,
+          "end_idx_processed": 116
+        },
+        "best_label": "NAME_FAMILY",
+        "labels": {
+          "NAME_FAMILY": 0.8678,
+          "NAME": 0.8852
+        }
+      },
+      {
+        "processed_text": "Clements",
+        "text": "Martinez",
+        "location": {
+          "stt_idx": 150,
+          "end_idx": 158,
+          "stt_idx_processed": 152,
+          "end_idx_processed": 160
+        },
+        "best_label": "NAME_FAMILY",
+        "labels": {
+          "NAME_FAMILY": 0.8817,
+          "NAME": 0.9027
+        }
+      },
+      {
+        "processed_text": "Garrison",
+        "text": "Thompson",
+        "location": {
+          "stt_idx": 180,
+          "end_idx": 188,
+          "stt_idx_processed": 182,
+          "end_idx_processed": 190
+        },
+        "best_label": "NAME_FAMILY",
+        "labels": {
+          "NAME": 0.906,
+          "NAME_FAMILY": 0.9184
+        }
+      }
+    ],
+    "entities_present": true,
+    "languages_detected": {
+      "en": 0.9671635627746582
+    },
+    "characters_processed": 211
+  }
+]

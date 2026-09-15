@@ -1,0 +1,27 @@
+# file system binaries
+.DS_Store
+
+# virtual environments
+.venv
+
+# environment variables
+.env
+
+# python build/runtime artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# gender detection API cache (written at runtime when enable_api_gender=True)
+.gender_cache.json
+
+# editor / tooling local settings
+.claude/
+.vscode/
+.idea/
+
+# sample output folders (generated when running samples)
+sample_output/
+sample_output_batch/

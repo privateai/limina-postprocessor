@@ -1,0 +1,105 @@
+[
+  {
+    "processed_text": "The medical team includes Dr. Brown Davidson Sr., Dr. Clemente Jose, and Prof. Angular Joe. Davidson Sr reviewed the patient records while Jose performed the examination. Professor Joe provided a second opinion.",
+    "entities": [
+      {
+        "processed_text": "Brown Davidson Sr",
+        "text": "James Wilson Sr",
+        "location": {
+          "stt_idx": 30,
+          "end_idx": 45,
+          "stt_idx_processed": 30,
+          "end_idx_processed": 47
+        },
+        "best_label": "NAME",
+        "labels": {
+          "NAME": 0.9084,
+          "NAME_FAMILY": 0.3346,
+          "NAME_GIVEN": 0.3006
+        }
+      },
+      {
+        "processed_text": "Clemente Jose",
+        "text": "Patricia Chen",
+        "location": {
+          "stt_idx": 52,
+          "end_idx": 65,
+          "stt_idx_processed": 54,
+          "end_idx_processed": 67
+        },
+        "best_label": "NAME",
+        "labels": {
+          "NAME": 0.9109,
+          "NAME_FAMILY": 0.2801,
+          "NAME_GIVEN": 0.5618
+        }
+      },
+      {
+        "processed_text": "Angular Joe",
+        "text": "Robert Lee",
+        "location": {
+          "stt_idx": 77,
+          "end_idx": 87,
+          "stt_idx_processed": 79,
+          "end_idx_processed": 90
+        },
+        "best_label": "NAME",
+        "labels": {
+          "NAME_FAMILY": 0.2776,
+          "NAME_GIVEN": 0.5353,
+          "NAME": 0.9136
+        }
+      },
+      {
+        "processed_text": "Davidson Sr",
+        "text": "Wilson",
+        "location": {
+          "stt_idx": 89,
+          "end_idx": 95,
+          "stt_idx_processed": 92,
+          "end_idx_processed": 103
+        },
+        "best_label": "NAME_FAMILY",
+        "labels": {
+          "NAME_FAMILY": 0.9024,
+          "NAME": 0.9051
+        }
+      },
+      {
+        "processed_text": "Jose",
+        "text": "Chen",
+        "location": {
+          "stt_idx": 131,
+          "end_idx": 135,
+          "stt_idx_processed": 139,
+          "end_idx_processed": 143
+        },
+        "best_label": "NAME_FAMILY",
+        "labels": {
+          "NAME": 0.8985,
+          "NAME_FAMILY": 0.8943
+        }
+      },
+      {
+        "processed_text": "Joe",
+        "text": "Lee",
+        "location": {
+          "stt_idx": 173,
+          "end_idx": 176,
+          "stt_idx_processed": 181,
+          "end_idx_processed": 184
+        },
+        "best_label": "NAME_FAMILY",
+        "labels": {
+          "NAME": 0.8759,
+          "NAME_FAMILY": 0.913
+        }
+      }
+    ],
+    "entities_present": true,
+    "languages_detected": {
+      "en": 0.8932544589042664
+    },
+    "characters_processed": 203
+  }
+]

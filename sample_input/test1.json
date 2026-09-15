@@ -1,0 +1,89 @@
+[
+  {
+    "processed_text": "Patient Mary Smith visited the clinic on March 15th. Dr. Huang Wenyang examined Mr. Smith and prescribed medication. Smith will return for a follow-up with Dr. Wenyang next month.",
+    "entities": [
+      {
+        "processed_text": "Mary Smith",
+        "text": "John Smith",
+        "location": {
+          "stt_idx": 8,
+          "end_idx": 18,
+          "stt_idx_processed": 8,
+          "end_idx_processed": 18
+        },
+        "best_label": "NAME",
+        "labels": {
+          "NAME_GIVEN": 0.3563,
+          "NAME": 0.9014,
+          "NAME_FAMILY": 0.4492
+        }
+      },
+      {
+        "processed_text": "Huang Wenyang",
+        "text": "Sarah Johnson",
+        "location": {
+          "stt_idx": 57,
+          "end_idx": 70,
+          "stt_idx_processed": 57,
+          "end_idx_processed": 70
+        },
+        "best_label": "NAME",
+        "labels": {
+          "NAME_FAMILY": 0.5072,
+          "NAME_GIVEN": 0.3364,
+          "NAME": 0.9098
+        }
+      },
+      {
+        "processed_text": "Smith",
+        "text": "Smith",
+        "location": {
+          "stt_idx": 84,
+          "end_idx": 89,
+          "stt_idx_processed": 84,
+          "end_idx_processed": 89
+        },
+        "best_label": "NAME_FAMILY",
+        "labels": {
+          "NAME": 0.9057,
+          "NAME_FAMILY": 0.8758
+        }
+      },
+      {
+        "processed_text": "Smith",
+        "text": "Smith",
+        "location": {
+          "stt_idx": 117,
+          "end_idx": 122,
+          "stt_idx_processed": 117,
+          "end_idx_processed": 122
+        },
+        "best_label": "NAME_FAMILY",
+        "labels": {
+          "NAME": 0.901,
+          "NAME_FAMILY": 0.886
+        }
+      },
+      {
+        "processed_text": "Wenyang",
+        "text": "Johnson",
+        "location": {
+          "stt_idx": 160,
+          "end_idx": 167,
+          "stt_idx_processed": 160,
+          "end_idx_processed": 167
+        },
+        "best_label": "NAME_FAMILY",
+        "labels": {
+          "NAME": 0.8882,
+          "NAME_FAMILY": 0.9044
+        }
+      }
+    ],
+    "entities_present": true,
+    "languages_detected": {
+      "en": 0.9291139841079712
+    },
+    "characters_processed": 179
+  }
+]

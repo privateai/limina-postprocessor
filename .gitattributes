@@ -1,0 +1,2 @@
+# Git LFS tracking for the name dictionary (GitHub limit: 4 GB per file)
+limina_postprocessor/data/*.parquet filter=lfs diff=lfs merge=lfs -text
