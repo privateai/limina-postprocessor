@@ -28,7 +28,7 @@ Output: "Patient Andrew Davis visited Dr. Jessica Thompson..."
 **Key Features:**
 - **1.2B name dictionary** - US Census data + filtered famous names
 - **Global uniqueness tracking** - Zero cross-document reuse per entity type
-- **Pure PyArrow** - Memory-mapped row group reads (~50MB RAM, no DuckDB)
+- **Pure PyArrow** - Memory-mapped row group reads; the 3.8GB file is never loaded
 - **3-tier gender detection** - Titles → census → API fallback (off by default)
 - **Entity-level tracking** - NAME, NAME_GIVEN, NAME_FAMILY tracked independently
 - **Package-based** - Easy ETL integration with `pip install`
@@ -86,11 +86,12 @@ Replaces name entities with synthetic names from a 1.2B name dictionary.
 6. **Honorific Handling:** see [Honorific Handling](#honorific-handling)
 
 **Performance** (measured on the 1.2B / 3.8GB dictionary, single process):
-- **Initialization:** ~0.05s (reads parquet metadata only, no data scan)
-- **Per generated name:** `NAME` 2.78ms · `NAME_FAMILY` 1.50ms · `NAME_GIVEN` 0.92ms
-- **Per document:** ~7.9ms on the sample corpus (~4 name entities each)
-- **Memory:** ~50MB steady state for sampling — but `used_names_global` grows
-  ~139 bytes per name retained (see [Scale Limits](#scale-limits))
+- **Initialization:** 28ms (reads parquet metadata only, no data scan)
+- **Per generated name:** `NAME` 2.58ms · `NAME_FAMILY` 1.41ms · `NAME_GIVEN` 0.86ms
+- **Per document:** 2.60ms × distinct names — independent of document length
+- **Memory:** sampling decodes one ~2MB row group per name; the growth that matters is
+  `used_names_global`, at ~63 bytes per name plus a lookup table
+  (see [Performance Benchmark Results](#performance-benchmark-results) and [Scale Limits](#scale-limits))
 
 ### 2. **Gender Detector** (`limina_postprocessor/handlers/gender_detector.py`)
 
@@ -348,17 +349,84 @@ payload = {
 
 ---
 
+<a name="performance-benchmark-results"></a>
+## Performance Benchmark Results
+
+| Metric | Measured |
+|---|---|
+| Per distinct name, end to end | **2.60 ms** → 385 names/sec/core |
+| `NAME` · `NAME_FAMILY` · `NAME_GIVEN` | 2.58ms · 1.41ms · 0.86ms (median) |
+| Initialization | 28.2 ms |
+| Uniqueness | 50,000 draws, **0 duplicates** |
+| Text length, 259 → 400,293 chars | 13.22 → 13.38 ms — no change |
+| Mentions per person, 1× → 10× | 13.22 → 13.25 ms — no change |
+| Document with no names, up to 10MB | 0.0005 ms |
+
+**The takeaway: cost scales with distinct people and nothing else.** A 400KB note costs
+the same as a 250-byte one, naming someone ten times costs the same as once, and
+documents with no names are free.
+Estimate a run as `distinct people × 2.6 ms`; document and byte counts aren't useful
+inputs.
+
+<a name="memory-explained"></a>
+<a name="capacity-planning"></a>
+### Memory
+
+Uniqueness works by retaining every name already issued, so memory grows for the life
+of the process — by design, not a leak. Budget from distinct names:
+
+| Distinct names | Memory for uniqueness | Runtime, 1 core |
+|---|---|---|
+| 10M | 0.9 GB | 7.2 h |
+| 100M | 10.6 GB | 3 days |
+| 700M | 78.3 GB | 21 days |
+
+Treat these as a **floor** for RAM sizing — every name draw checks the whole set, so it
+has to fit in real memory. If the machine is short on RAM the operating system will start
+swapping the set to disk, and throughput collapses. Increasing throughput by adding cores
+is possible, but there is a trade-off — see below.
+
+<a name="cores-and-uniqueness"></a>
+### Cores and uniqueness
+
+The per-name cost is CPU-bound parquet decode, and each draw is independent work, so
+runtime divides cleanly across processes:
+
+| Workers | 700M names |
+|---|---|
+| 1 | 505 h (21 days) |
+| 8 | 63 h |
+| 32 | 15.8 h |
+
+**Uniqueness is not guaranteed if the work is parallelized.** It is enforced by a name
+set kept in memory, and that set lives inside a single process. Run 32 workers and you
+have 32 independent sets: worker 3 cannot see what worker 17 has issued, both sample the
+same 1.2B row dictionary, and both will eventually hand out the same name. At 700M names
+over half the dictionary is consumed, so collisions are the expected outcome of
+parallelization rather than an edge case.
+
+Ways to keep the speedup along with the uniqueness guarantee are being explored. See
+[Scale Limits](#scale-limits).
+
+Measured on macOS, Python 3.9.6, seed 20260917, single process. Absolute times are
+hardware-dependent; re-run before committing to a schedule.
+
+---
+
 ## Technical Details
 
 ### PyArrow Integration
 
 **Why pure PyArrow?**
 - Memory-maps the 3.8GB parquet file; row groups are decoded only when sampled
-- Memory usage: ~50MB (vs 192GB if loaded in-memory)
+- Decodes ~2MB per draw instead of the ~192GB the table would occupy in memory
 - One dependency instead of two — no SQL engine needed for a single-table lookup
 - **~214× faster than previous design.** `LIMIT 1 OFFSET n` combined
   with `WHERE gender = ?` forced a scan of up to 554M rows per query, measured at
   **686ms median / 1.26s p95**. Row group sampling avoids the scan entirely: **2.78ms**.
+  (Both halves of this comparison are from the same run, so they are left as measured;
+  the current figure on newer hardware is 2.58ms — see
+  [Performance Benchmark Results](#performance-benchmark-results).)
 
 **Sampling Strategy (Random Row Group):**
 
@@ -468,15 +536,18 @@ has enough headroom for a 700M-entity run.
 
 Two further constraints apply beyond the sample-corpus scale this package is verified at:
 
-- **Memory.** `used_names_global` costs ~139 bytes per retained name (measured):
-  10M names ≈ 1.4GB, 100M ≈ 14GB, **700M ≈ 97GB**. A single process needs a host
-  with headroom above that or it will swap.
+- **Memory.** `used_names_global` retains every name issued: ~63 bytes of string per
+  name, plus a hash table that doubles as it grows. Measured and modelled:
+  10M names ≈ 0.9GB, 100M ≈ 10.6GB, **700M ≈ 78GB**. A single process needs a host
+  with headroom above that or it will swap. Full table in
+  [Memory](#memory-explained).
 - **Parallelism breaks the guarantee.** Each worker process holds its own
   `used_names_global`, so two workers can independently emit the same name. There is
-  currently no shared or partitioned uniqueness store. `full_name` values *are*
-  globally unique in the parquet (verified over 1.5M sampled rows), so assigning each
-  worker a disjoint subset of row groups would make cross-worker uniqueness hold by
-  construction — this is not implemented.
+  currently no shared or partitioned uniqueness store. Assigning each worker a disjoint
+  subset of row groups would get most of the way there, though `full_name` is unique per
+  gender rather than globally (~9% of rows are repeats), so that alone would not fully
+  close the gap. Approaches are being explored — see
+  [Cores and uniqueness](#cores-and-uniqueness).
 
 <a name="honorific-handling"></a>
 ### Honorific Handling
@@ -655,15 +726,17 @@ ls -lh limina_postprocessor/data/name_dictionary_1b_filtered.parquet
 **Problem:** Out of memory during initialization  
 **Solution:** 
 - Initialization reads parquet metadata only and needs well under 1GB
-- Steady-state usage for *sampling* is ~50MB: the file is memory-mapped and only one
-  row group (~124K rows, ~2MB) is decoded per generated name
+- Sampling itself is cheap: the file is memory-mapped and only one row group
+  (~124K rows, ~2MB) is decoded per generated name. Resident memory still climbs as
+  mapped dictionary pages accumulate, but those are file-backed and reclaimable —
+  the growth that needs budgeting is the uniqueness set, not sampling
 - If memory is still an issue, confirm `memory_map=True` is reaching
   `pq.ParquetFile` in `name_handler.py` — a non-mapped read pulls in more pages
 
 **Problem:** Memory grows steadily over a long run  
-**Cause:** Expected, not a leak. `used_names_global` retains every name handed out at
-~139 bytes each and is never cleared — that is what makes cross-document uniqueness
-work. Budget ~14GB per 100M entities. See [Scale Limits](#scale-limits).
+**Cause:** Expected, not a leak. `used_names_global` retains every name handed out and
+is never cleared — that is what makes cross-document uniqueness work. Budget ~10.6GB
+per 100M distinct names. See [Memory](#memory-explained) for a table of what to budget.
 
 ### Duplicate Names Appearing Across Documents
 

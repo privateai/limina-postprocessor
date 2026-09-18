@@ -265,6 +265,67 @@ for text in your_text_batches:
 
 ---
 
+<a name="performance-benchmark-results"></a>
+## Performance Benchmark Results
+
+| Metric | Measured |
+|---|---|
+| Per distinct name | **2.6 ms** → ~385 names/sec on one core |
+| Startup | 28 ms (the 3.8GB dictionary is memory-mapped, not loaded) |
+| Uniqueness | 50,000 draws, 0 duplicates |
+| Document length, 259 → 400,293 chars | 13.22 → 13.38 ms — no change |
+| Mentions per person, 1× → 10× | 13.22 → 13.25 ms — no change |
+| Document with no names, up to 10MB | 0.0005 ms |
+
+**Estimate comes from distinct people, not document count.** A 400KB note costs the same as a
+250-byte one, naming someone ten times costs the same as once, and documents with no
+names return immediately.
+Calculation for speed is `distinct people × 2.6 ms`; corpus size in GB isn't a useful input.
+
+Cost varies by entity type - full names (`NAME`) ~2.6ms, surnames ~1.4ms, first names
+~0.9ms - so a workload weighted toward first names runs faster than the headline.
+
+Measured on macOS, Python 3.9.6, seed 20260917, single process. Absolute times are
+hardware-dependent; re-run before committing to a schedule.
+
+### Memory
+
+Uniqueness works by retaining every synthetic name already issued, so memory grows for
+the whole run and is never released. That is the guarantee working as designed, not a
+leak.
+
+| Distinct names | Memory for uniqueness | Runtime, 1 core |
+|---|---|---|
+| 10M | 0.9 GB | 7.2 h |
+| 100M | 10.6 GB | 3 days |
+| 700M | 78.3 GB | 21 days |
+
+Treat these as a **floor** for RAM sizing — every name draw checks the whole set, so it
+has to fit in real memory. If the machine is short on RAM the operating system will start
+swapping the set to disk, and throughput collapses. Increasing throughput by increasing
+number of cores is possible, but there is a trade-off - see the parallelism note below.
+
+### Cores and uniqueness
+
+The per-name cost is CPU-bound parquet decode, and each draw is independent work, so
+runtime divides cleanly across processes:
+
+| Workers | 700M names |
+|---|---|
+| 1 | 505 h (21 days) |
+| 8 | 63 h |
+| 32 | 15.8 h |
+
+**Uniqueness is not guaranteed if labour is parallelized.** Uniqueness is enforced by the name set kept in memory and that
+set lives inside a single process (core). If you run 32 workers and you have 32 independent sets:
+worker 3 cannot see what worker 17 has issued, both sample the same 1.2B row
+dictionary, and both will eventually hand out the same name. At 700M names,
+over half the dictionary is consumed so collisions are the expected outcome from parallelization.
+
+Current ways to keep parallelization speedy along with the uniqueness guarantee of names are being explored.
+
+---
+
 ## Production Considerations
 
 The samples above run as-is. A few things to be aware of before scaling to a large job:
@@ -273,10 +334,16 @@ The samples above run as-is. A few things to be aware of before scaling to a lar
   tracked per instance, so building a new one per batch restarts tracking and will
   reuse earlier names.
 - **Don't parallelize across processes yet.** Workers don't share uniqueness
-  tracking, so `N` processes can emit up to `N` copies of a name. This needs a
-  change inside the package — talk to us first.
+  tracking, so `N` processes can emit up to `N` copies of a name. This is the central
+  trade-off at scale: one process keeps the guarantee but needs the full memory budget
+  and serial runtime, while `N` processes cut runtime by `N` and give the guarantee up.
+  Partitioning the dictionary's row groups across workers would restore it by
+  construction, but that is not implemented.
 - **Memory grows with the run**, since every name issued is retained to guarantee it
-  is never reused: roughly 1.4GB per 10M replacements (~100GB at 700M).
+  is never reused: ~0.9GB per 10M distinct names, ~78GB at 700M. See
+  [Performance Benchmark Results](#performance-benchmark-results).
+- **Memory, not CPU, is the binding constraint at scale.** Runtime parallelizes;
+  the uniqueness set does not.
 - **`NAME_GIVEN` and `NAME_FAMILY` have much smaller pools** than the headline 1.2
   billion (~7,500 first names and ~162,000 surnames). If a pool runs out, duplicates
   appear with no error, so let us know your expected volume per entity type.
@@ -325,14 +392,14 @@ pip install --break-system-packages pyarrow requests
 
 **Problem:** Out of memory during initialization  
 **Solution:**
-- Steady-state usage is ~50MB; the dictionary is memory-mapped, not loaded
+- Startup reads parquet metadata only; the 3.8GB dictionary is memory-mapped, not loaded
 - Ensure the parquet file is on local disk (not a network mount) for best performance
-- The dictionary itself is 3.8GB on disk but sampling uses only ~50MB RAM
+- Each generated name decodes one ~2MB row group, so sampling itself is cheap
 
 **Problem:** Memory grows steadily over a long run  
 **Cause:** Expected, not a leak. Every name handed out is retained so it is never
 reused — that is what enforces uniqueness. See
-[Production Considerations](#production-considerations) for how much to budget.
+[Performance Benchmark Results](#performance-benchmark-results) for a table of what to budget.
 
 ### Duplicate Names Across Documents
 
