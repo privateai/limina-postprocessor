@@ -2,6 +2,7 @@
 """Gender detection service with three-tier fallback strategy."""
 
 import json
+import threading
 from pathlib import Path
 from typing import Optional, Dict
 import requests
@@ -29,8 +30,11 @@ class GenderDetector:
         # Tier 2: Load census data into memory
         self.census_lookup = self._load_census_data(census_data_dir)
 
-        # Tier 3: API cache
+        # Tier 3: API cache. Guarded because _cache_api_result both mutates the dict and
+        # rewrites the file, and lookups can run concurrently under process_documents.
+        # Everything else on this object is read-only after __init__.
         self.api_cache = self._load_api_cache()
+        self._api_lock = threading.Lock()
 
     def _load_name_counts(self, filepath: Path, gender: str) -> Dict[str, Dict[str, int]]:
         """Load name counts from JSON file."""
@@ -171,14 +175,22 @@ class GenderDetector:
 
             # Only trust high-confidence results (>70%)
             if gender and probability >= 0.7:
-                self.api_cache[cache_key] = gender
-                self._save_api_cache()
+                self._cache_api_result(cache_key, gender)
                 return gender
 
         except Exception:
             pass
 
         # Cache negative result
-        self.api_cache[cache_key] = None
-        self._save_api_cache()
+        self._cache_api_result(cache_key, None)
         return None
+
+    def _cache_api_result(self, cache_key: str, gender: Optional[str]):
+        """Record an API result and persist it.
+
+        Locked so two concurrent lookups cannot interleave their dict writes with
+        json.dump and leave a truncated cache file on disk.
+        """
+        with self._api_lock:
+            self.api_cache[cache_key] = gender
+            self._save_api_cache()

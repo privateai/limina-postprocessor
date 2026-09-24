@@ -2,6 +2,7 @@
 """Name entity handler for replacing name entities by sampling parquet row groups."""
 
 import random
+import threading
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
@@ -45,7 +46,10 @@ class NameHandler(BaseEntityHandler):
         self.parquet = pq.ParquetFile(dictionary_path, memory_map=True)
         self.dictionary_rows = self.parquet.metadata.num_rows
 
-        # Index row groups by gender from column statistics (metadata only, no scan)
+        # Index row groups by gender from column statistics (metadata only, no scan).
+        # _sample_row_group corrects this index as it learns what each row group really
+        # holds, so it changes at run time and needs guarding once threads are in play.
+        self._index_lock = threading.Lock()
         self.row_groups = {'male': [], 'female': []}
         self.mixed_row_groups = set()
         self._index_row_groups()
@@ -65,17 +69,27 @@ class NameHandler(BaseEntityHandler):
             reverse=True
         )
 
-        # Within-document coreference: smart component matching
-        self.last_name_to_full = {}   # Maps last name → full name (e.g., "Smith" → "John Smith")
-        self.first_name_to_full = {}  # Maps first name → full name (e.g., "John" → "John Smith")
-
-        # Global tracking to ensure NO repeats across documents
+        # Global tracking to ensure NO repeats across documents. Threads share this one
+        # set, which is what keeps the uniqueness guarantee intact under
+        # process_documents; separate processes each get their own copy of it and can
+        # therefore hand out the same name twice.
         self.used_names_global = set()  # Track all names used across ALL documents
+        self._names_lock = threading.Lock()
 
     def __del__(self):
         """Close the parquet file handle on cleanup."""
         if hasattr(self, 'parquet'):
             self.parquet.close()
+
+    @property
+    def last_name_to_full(self):
+        """Maps last name -> full name ("Smith" -> "John Smith"), for this document."""
+        return self._doc_dict('last_name_to_full')
+
+    @property
+    def first_name_to_full(self):
+        """Maps first name -> full name ("John" -> "John Smith"), for this document."""
+        return self._doc_dict('first_name_to_full')
 
     def _index_row_groups(self):
         """Record which row groups can contain each gender, using parquet statistics."""
@@ -210,16 +224,23 @@ class NameHandler(BaseEntityHandler):
             if len(candidates) == 0:
                 continue
 
-            # Probe within the decoded row group before paying for another read
-            for _ in range(min(self.PROBES_PER_ROW_GROUP, len(candidates))):
-                check_name = candidates[random.randrange(len(candidates))].as_py()
+            # Probe within the decoded row group before paying for another read.
+            #
+            # The check-and-add has to be atomic, or two threads that both find
+            # `check_name` unused will both emit it. The lock covers only this probe
+            # loop, never the row group read above: that read is ~99% of the time and
+            # the only part that runs in parallel, so holding the lock across it would
+            # serialize the whole benefit away.
+            with self._names_lock:
+                for _ in range(min(self.PROBES_PER_ROW_GROUP, len(candidates))):
+                    check_name = candidates[random.randrange(len(candidates))].as_py()
 
-                # If not used globally, mark it and use it
-                if check_name not in self.used_names_global:
-                    self.used_names_global.add(check_name)
-                    return self._match_capitalization(original_text, check_name)
+                    # If not used globally, mark it and use it
+                    if check_name not in self.used_names_global:
+                        self.used_names_global.add(check_name)
+                        return self._match_capitalization(original_text, check_name)
 
-                fallback = check_name
+                    fallback = check_name
 
         # If we couldn't find unused name in 100 probes (very unlikely), use it anyway
         # This should never happen with 1.2B names
@@ -237,13 +258,27 @@ class NameHandler(BaseEntityHandler):
         after reading. Each such read also teaches us what the row group really holds,
         and the index is corrected accordingly, so the filtering cost fades as row
         groups are visited. Never returns an empty result.
+
+        Safe to call from several threads: the index is read and corrected under
+        `_index_lock`, but the decode itself runs unlocked, which is where pyarrow
+        releases the GIL and where the parallelism actually comes from. Reading
+        `needs_filtering` under the lock and then acting on it after releasing is sound
+        because `mixed_row_groups` only ever shrinks — nothing adds to it after __init__.
+        A concurrent update can therefore only make us filter a row group that no longer
+        needs it, which wastes a little work and cannot produce a wrong gender.
         """
         other = 'female' if gender == 'male' else 'male'
 
-        while self.row_groups[gender]:
-            row_group = random.choice(self.row_groups[gender])
+        while True:
+            with self._index_lock:
+                if not self.row_groups[gender]:
+                    raise RuntimeError(
+                        f"No {gender} names available in {self.dictionary_path}"
+                    )
+                row_group = random.choice(self.row_groups[gender])
+                needs_filtering = row_group in self.mixed_row_groups
 
-            if row_group not in self.mixed_row_groups:
+            if not needs_filtering:
                 table = self.parquet.read_row_group(row_group, columns=[column])
                 return table.column(column)
 
@@ -253,22 +288,23 @@ class NameHandler(BaseEntityHandler):
 
             if table.num_rows == 0:
                 # Holds none of this gender, so stop offering it for this gender
-                self._drop_row_group(row_group, gender)
+                with self._index_lock:
+                    self._drop_row_group(row_group, gender)
                 continue
 
             if table.num_rows == total_rows:
                 # Holds only this gender, so it never needs filtering again
-                self.mixed_row_groups.discard(row_group)
-                self._drop_row_group(row_group, other)
+                with self._index_lock:
+                    self.mixed_row_groups.discard(row_group)
+                    self._drop_row_group(row_group, other)
 
             return table.column(column)
 
-        raise RuntimeError(
-            f"No {gender} names available in {self.dictionary_path}"
-        )
-
     def _drop_row_group(self, row_group: int, gender: str):
-        """Remove a row group from a gender's pool once it is known not to apply."""
+        """Remove a row group from a gender's pool once it is known not to apply.
+
+        Caller must hold `_index_lock`.
+        """
         try:
             self.row_groups[gender].remove(row_group)
         except ValueError:
@@ -294,9 +330,3 @@ class NameHandler(BaseEntityHandler):
         elif original.islower():
             return replacement.lower()
         return replacement
-
-    def clear_cache(self):
-        """Clear cache for new document, including smart matching caches."""
-        super().clear_cache()
-        self.last_name_to_full = {}
-        self.first_name_to_full = {}
