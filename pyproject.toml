@@ -32,8 +32,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
+    "pre-commit>=3.0.0",
     "black>=22.0.0",
-    "flake8>=5.0.0",
+    "isort>=5.12.0",
 ]
 
 [project.scripts]
@@ -47,3 +48,9 @@ limina_postprocessor = [
     "data/census_data/*.json",
     "data/*.parquet",
 ]
+
+[tool.black]
+line-length = 150
+
+[tool.isort]
+profile = "black"
