@@ -255,22 +255,38 @@ def test_each_thread_reads_through_its_own_parquet_reader(processor):
     and failed on a newer install. Asserted structurally rather than by hammering the
     decode, so the guard does not depend on which pyarrow is installed or on winning a
     race.
+
+    Compared by identity while holding a reference to every reader, not by id(). A
+    thread's reader dies with the thread, and CPython reuses the address, so ids
+    collected from threads that have already exited collide and read as sharing.
+    The barrier keeps all four threads inside _reader at once, which is the situation
+    the assertion is actually about.
     """
     handler = processor.handlers[0]
+    count = 4
+    ready = threading.Barrier(count)
     readers = {}
 
     def record(name):
-        readers[name] = id(handler._reader())
+        ready.wait(timeout=30)
+        readers[name] = handler._reader()
+        # Same thread, second call: the reader must be cached, not reopened per read.
+        assert handler._reader() is readers[name]
 
-    threads = [threading.Thread(target=record, args=(i,)) for i in range(4)]
+    threads = [threading.Thread(target=record, args=(i,)) for i in range(count)]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
 
-    assert len(set(readers.values())) == len(readers), "threads shared a parquet reader"
-    assert id(handler.parquet) not in set(readers.values()), \
-        "a worker thread reused the reader owned by the constructing thread"
+    assert len(readers) == count, "a thread failed to reach the barrier"
+
+    owned = list(readers.values())
+    for position, reader in enumerate(owned):
+        for other in owned[position + 1:]:
+            assert reader is not other, "threads shared a parquet reader"
+        assert reader is not handler.parquet, \
+            "a worker thread reused the reader owned by the constructing thread"
 
 
 def test_constructing_thread_does_not_open_a_second_reader(processor):
