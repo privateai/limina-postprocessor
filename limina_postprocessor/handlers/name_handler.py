@@ -47,10 +47,25 @@ class NameHandler(BaseEntityHandler):
         if not Path(dictionary_path).exists():
             raise FileNotFoundError(f"Dictionary not found: {dictionary_path}")
 
-        # Memory-map the parquet file; row groups are decoded only when sampled
+        # Memory-map the parquet file; row groups are decoded only when sampled.
+        #
+        # pre_buffer is pinned off rather than left to the default. It coalesces reads
+        # through a background I/O pool to hide latency on remote filesystems, which buys
+        # a memory-mapped local file nothing, and the ReadRangeCache backing it is the
+        # per-reader state that makes a shared ParquetFile unsafe to read from several
+        # threads (see _reader). pyarrow turned the default on in 25 — it was off through
+        # 21 — so leaving it implicit means the same code is thread-hostile or not
+        # depending on which pyarrow the host resolved.
         self.dictionary_path = dictionary_path
-        self.parquet = pq.ParquetFile(dictionary_path, memory_map=True)
+        self.parquet = pq.ParquetFile(dictionary_path, memory_map=True, pre_buffer=False)
         self.dictionary_rows = self.parquet.metadata.num_rows
+
+        # One reader per thread; the constructing thread reuses the one just opened, so
+        # single-threaded callers open nothing extra. The footer is kept so that a new
+        # thread's reader does not re-parse it. See _reader.
+        self._metadata = self.parquet.metadata
+        self._local = threading.local()
+        self._local.reader = self.parquet
 
         # Index row groups by gender from column statistics (metadata only, no scan).
         # _sample_row_group corrects this index as it learns what each row group really
@@ -276,14 +291,16 @@ class NameHandler(BaseEntityHandler):
         groups are visited. Never returns an empty result.
 
         Safe to call from several threads: the index is read and corrected under
-        `_index_lock`, but the decode itself runs unlocked, which is where pyarrow
-        releases the GIL and where the parallelism actually comes from. Reading
+        `_index_lock`, the decode runs unlocked against a reader this thread owns
+        (see `_reader`), and unlocked decoding is where pyarrow releases the GIL and
+        where the parallelism actually comes from. Reading
         `needs_filtering` under the lock and then acting on it after releasing is sound
         because `mixed_row_groups` only ever shrinks — nothing adds to it after __init__.
         A concurrent update can therefore only make us filter a row group that no longer
         needs it, which wastes a little work and cannot produce a wrong gender.
         """
         other = 'female' if gender == 'male' else 'male'
+        reader = self._reader()
 
         while True:
             with self._index_lock:
@@ -295,10 +312,10 @@ class NameHandler(BaseEntityHandler):
                 needs_filtering = row_group in self.mixed_row_groups
 
             if not needs_filtering:
-                table = self.parquet.read_row_group(row_group, columns=[column])
+                table = reader.read_row_group(row_group, columns=[column])
                 return table.column(column)
 
-            table = self.parquet.read_row_group(row_group, columns=[column, 'gender'])
+            table = reader.read_row_group(row_group, columns=[column, 'gender'])
             total_rows = table.num_rows
             table = table.filter(pc.equal(table.column('gender'), gender))
 
@@ -315,6 +332,36 @@ class NameHandler(BaseEntityHandler):
                     self._drop_row_group(row_group, other)
 
             return table.column(column)
+
+    def _reader(self):
+        """The parquet reader belonging to the calling thread.
+
+        pq.ParquetFile is not safe to read from concurrently: one reader carries mutable
+        state across a read_row_group call, so two threads in that call at once can
+        invalidate each other's and fail with "ReadRangeCache did not find matching cache
+        entry". Giving each thread its own reader removes the sharing instead of locking
+        around it — a lock would have to span the decode, which is where the GIL is
+        released and where all of the parallelism comes from.
+
+        Cheap to do per thread: the file is memory-mapped, so the readers share the same
+        pages, and the footer is handed over already parsed. That last part is not an
+        optimization detail — parsing it costs ~13 ms for the 9,659 row groups in the
+        3.8 GB dictionary, and process_documents builds a fresh pool per call, so new
+        threads open readers on every call rather than once per process. Paying the footer
+        each time measured a third of the parallel run time; reusing it is ~0.1 ms.
+
+        Readers are dropped when their thread exits, which for a pool is at shutdown.
+        """
+        reader = getattr(self._local, 'reader', None)
+        if reader is None:
+            reader = pq.ParquetFile(
+                self.dictionary_path,
+                metadata=self._metadata,
+                memory_map=True,
+                pre_buffer=False,
+            )
+            self._local.reader = reader
+        return reader
 
     def _drop_row_group(self, row_group: int, gender: str):
         """Remove a row group from a gender's pool once it is known not to apply.
@@ -350,7 +397,9 @@ class NameHandler(BaseEntityHandler):
 
         base = head.rstrip()
         separator = ", " if base.endswith(",") else " "
-        return base.rstrip(","), f"{separator}{last}"
+        # Commas and any space before them, so "Brown , Jr." does not leave the base name
+        # with a trailing space and miss the cache entry for a plain "Brown".
+        return base.rstrip(', '), f"{separator}{last}"
 
     def _split_title(self, name: str) -> tuple:
         """Split a leading honorific off a name, returning (title, remaining_name).

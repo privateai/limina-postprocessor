@@ -25,6 +25,7 @@ not as race detectors. They will not catch a lock someone deletes.
 """
 import itertools
 import random
+import threading
 
 import pytest
 
@@ -242,6 +243,45 @@ def test_worker_exception_propagates_to_the_caller(processor):
 
     with pytest.raises(AttributeError):
         processor.process_documents(docs, workers=4)
+
+
+def test_each_thread_reads_through_its_own_parquet_reader(processor):
+    """No two threads may share a pq.ParquetFile.
+
+    A shared reader carries mutable state across read_row_group, so concurrent readers
+    can invalidate each other and raise "ReadRangeCache did not find matching cache
+    entry". That shows up only when pyarrow has pre-buffering on — default since 25,
+    off through 21 — and even then only when two threads collide, so it passed locally
+    and failed on a newer install. Asserted structurally rather than by hammering the
+    decode, so the guard does not depend on which pyarrow is installed or on winning a
+    race.
+    """
+    handler = processor.handlers[0]
+    readers = {}
+
+    def record(name):
+        readers[name] = id(handler._reader())
+
+    threads = [threading.Thread(target=record, args=(i,)) for i in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(set(readers.values())) == len(readers), "threads shared a parquet reader"
+    assert id(handler.parquet) not in set(readers.values()), \
+        "a worker thread reused the reader owned by the constructing thread"
+
+
+def test_constructing_thread_does_not_open_a_second_reader(processor):
+    """The reader opened in __init__ is the one a single-threaded caller uses.
+
+    workers=1 takes no pool and runs on the calling thread, so opening a second reader
+    there would be pure cost on the path that gains nothing from threading.
+    """
+    handler = processor.handlers[0]
+
+    assert handler._reader() is handler.parquet
 
 
 def test_processor_can_be_reused_across_calls(processor):
