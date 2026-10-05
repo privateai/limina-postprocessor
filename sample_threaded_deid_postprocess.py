@@ -296,6 +296,10 @@ def report_verification(per_document, cross_document, processed):
     print(f"{'cross-document issues':<24}{len(cross_document):>6}")
 
     if not per_document and not cross_document:
+        # A report left by an earlier failing run would otherwise sit in the output folder
+        # looking current, and the folder is the first place anyone checks results.
+        FAILURE_REPORT_PATH.unlink(missing_ok=True)
+
         print("\n✅ Index accuracy       - every span slices back to its entity")
         print("✅ Honorifics           - Dr./Mr./Mrs./Ms./Prof./Jr./Sr. counts unchanged from the original")
         print("✅ Coreference          - one original name, one replacement per document")
