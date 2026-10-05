@@ -37,7 +37,12 @@ from pathlib import Path
 
 sys.path.insert(0, ".")
 import limina_postprocessor
-from sample_inline_deid_postprocess import DEID_API_URL, SAMPLE_TEXTS, call_deid_api_batch, verify_output
+from sample_inline_deid_postprocess import (
+    DEID_API_URL,
+    SAMPLE_TEXTS,
+    call_deid_api_batch,
+    verify_output,
+)
 
 OUTPUT_FOLDER = Path("sample_output_threaded_deid")
 CACHE_PATH = OUTPUT_FOLDER / "deid_raw.json"
@@ -63,6 +68,7 @@ MAX_ISSUES_SHOWN = 15
 
 
 # ------------------------------------------------------------------ DEID container
+
 
 def fetch_from_container(texts, batch_size):
     """Call the DEID container in batches, returning its documents as one flat list.
@@ -116,6 +122,7 @@ def load_deid_output(texts, batch_size, refresh):
 
 
 # ------------------------------------------------------------------ measurement
+
 
 def fresh(documents):
     """A deep copy, so each timed pattern starts from identical untouched DEID output.
@@ -264,6 +271,7 @@ def verify_all(texts, deid_documents, processed):
 
 # ------------------------------------------------------------------ reporting
 
+
 def report_timings(timings, document_count, measurable):
     print(f"\n{'=' * 78}")
     print(f"POST-PROCESSING TIMINGS ({document_count} documents from the DEID container)")
@@ -346,6 +354,7 @@ def report_verification(per_document, cross_document, processed):
 
 
 # ------------------------------------------------------------------ main
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Threaded batching over live DEID container output")

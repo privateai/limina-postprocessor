@@ -15,7 +15,7 @@ from limina_postprocessor import DEFAULT_DICTIONARY
 from limina_postprocessor.handlers.name_handler import NameHandler
 
 pytestmark = pytest.mark.skipif(
-    not __import__('pathlib').Path(DEFAULT_DICTIONARY).exists(),
+    not __import__("pathlib").Path(DEFAULT_DICTIONARY).exists(),
     reason="name dictionary not downloaded (see README: Git LFS)",
 )
 
@@ -28,38 +28,45 @@ def handler():
 
 # --- splitting ---------------------------------------------------------------------
 
-@pytest.mark.parametrize("name, expected", [
-    ("James Wilson Sr", ("James Wilson", " Sr")),
-    ("James Wilson Sr.", ("James Wilson", " Sr.")),
-    ("James Wilson jr", ("James Wilson", " jr")),
-    ("Henry Ford III", ("Henry Ford", " III")),
-    ("Alan Grant IV", ("Alan Grant", " IV")),
-    ("Bob Dole II", ("Bob Dole", " II")),
-    # The comma belongs to the suffix, so reattaching is concatenation and the name does
-    # not come back as "Evarts Jr" when it arrived as "Evarts, Jr".
-    ("Michael Brown, Jr.", ("Michael Brown", ", Jr.")),
-    ("Michael Brown , Jr.", ("Michael Brown", ", Jr.")),
-])
+
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        ("James Wilson Sr", ("James Wilson", " Sr")),
+        ("James Wilson Sr.", ("James Wilson", " Sr.")),
+        ("James Wilson jr", ("James Wilson", " jr")),
+        ("Henry Ford III", ("Henry Ford", " III")),
+        ("Alan Grant IV", ("Alan Grant", " IV")),
+        ("Bob Dole II", ("Bob Dole", " II")),
+        # The comma belongs to the suffix, so reattaching is concatenation and the name does
+        # not come back as "Evarts Jr" when it arrived as "Evarts, Jr".
+        ("Michael Brown, Jr.", ("Michael Brown", ", Jr.")),
+        ("Michael Brown , Jr.", ("Michael Brown", ", Jr.")),
+    ],
+)
 def test_a_trailing_suffix_is_split_off(handler, name, expected):
     assert handler._split_suffix(name) == expected
 
 
-@pytest.mark.parametrize("name", [
-    # Surnames that merely end in a suffix's letters must survive intact.
-    "Sriram Junior",
-    "John Sridhar",
-    "Mary Srinivasan",
-    "Juan Iverson",
-    # Bare "V" and "I" are excluded deliberately: as a trailing token they are far more
-    # often a middle initial than a generational marker.
-    "Robert Downey V",
-    "Robert Downey I",
-    # Nothing to split: one token is all there is to go on, so keep it as the name.
-    "Jr",
-    "Sr.",
-    "",
-    "   ",
-])
+@pytest.mark.parametrize(
+    "name",
+    [
+        # Surnames that merely end in a suffix's letters must survive intact.
+        "Sriram Junior",
+        "John Sridhar",
+        "Mary Srinivasan",
+        "Juan Iverson",
+        # Bare "V" and "I" are excluded deliberately: as a trailing token they are far more
+        # often a middle initial than a generational marker.
+        "Robert Downey V",
+        "Robert Downey I",
+        # Nothing to split: one token is all there is to go on, so keep it as the name.
+        "Jr",
+        "Sr.",
+        "",
+        "   ",
+    ],
+)
 def test_nothing_is_split_when_there_is_no_suffix(handler, name):
     assert handler._split_suffix(name) == (name, None)
 
@@ -71,18 +78,22 @@ def test_only_the_last_token_counts(handler):
 
 # --- end to end through get_replacement --------------------------------------------
 
+
 def suffix_of(text):
     """The trailing suffix token of a replacement, or None."""
     _, suffix = NameHandler._split_suffix(NameHandler, text)
     return suffix
 
 
-@pytest.mark.parametrize("original, suffix", [
-    ("James Wilson Sr", " Sr"),
-    ("James Wilson Sr.", " Sr."),
-    ("Henry Ford III", " III"),
-    ("Michael Brown, Jr.", ", Jr."),
-])
+@pytest.mark.parametrize(
+    "original, suffix",
+    [
+        ("James Wilson Sr", " Sr"),
+        ("James Wilson Sr.", " Sr."),
+        ("Henry Ford III", " III"),
+        ("Michael Brown, Jr.", ", Jr."),
+    ],
+)
 def test_the_replacement_keeps_the_suffix(handler, original, suffix):
     replacement = handler.get_replacement({"best_label": "NAME", "text": original})
 
@@ -92,13 +103,12 @@ def test_the_replacement_keeps_the_suffix(handler, original, suffix):
 
 def test_a_title_and_a_suffix_both_survive(handler):
     """The reattachment order matters: title in front, suffix behind."""
-    replacement = handler.get_replacement(
-        {"best_label": "NAME_MEDICAL_PROFESSIONAL", "text": "Dr. James Wilson Sr"})
+    replacement = handler.get_replacement({"best_label": "NAME_MEDICAL_PROFESSIONAL", "text": "Dr. James Wilson Sr"})
 
     assert replacement.startswith("Dr. ")
     assert replacement.endswith(" Sr")
     # Title and suffix stripped, a real name was still drawn in between.
-    assert len(replacement[len("Dr. "):-len(" Sr")].split()) == 2
+    assert len(replacement[len("Dr. ") : -len(" Sr")].split()) == 2
 
 
 def test_the_suffix_is_not_mistaken_for_the_surname(handler):
@@ -115,7 +125,7 @@ def test_the_suffix_is_not_mistaken_for_the_surname(handler):
 
 
 def test_the_same_person_with_and_without_a_suffix_matches(handler):
-    """"James Wilson Sr" and "James Wilson" are one person, as with a title."""
+    """ "James Wilson Sr" and "James Wilson" are one person, as with a title."""
     with_suffix = handler.get_replacement({"best_label": "NAME", "text": "Clara Pembroke Sr"})
     without = handler.get_replacement({"best_label": "NAME", "text": "Clara Pembroke"})
 

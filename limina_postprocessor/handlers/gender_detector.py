@@ -4,28 +4,24 @@
 import json
 import threading
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Dict, Optional
+
 import requests
 
 
 class GenderDetector:
     """Three-tier gender detection with caching."""
 
-    def __init__(
-        self,
-        census_data_dir: str = "dataset/census_data",
-        enable_api: bool = False,
-        api_cache_file: str = ".gender_cache.json"
-    ):
+    def __init__(self, census_data_dir: str = "dataset/census_data", enable_api: bool = False, api_cache_file: str = ".gender_cache.json"):
         """Initialize gender detector."""
         self.enable_api = enable_api
         self.api_cache_file = Path(api_cache_file)
 
         # Tier 1: Title patterns (gender-specific only, neutral titles handled by census data)
-        self.male_titles = {'Mr.', 'Mr', 'Jr.', 'Jr', 'III', 'IV', 'Sr.', 'Sr'}
-        self.female_titles = {'Ms.', 'Ms', 'Mrs.', 'Mrs', 'Miss', 'Mss.', 'Mss'}
+        self.male_titles = {"Mr.", "Mr", "Jr.", "Jr", "III", "IV", "Sr.", "Sr"}
+        self.female_titles = {"Ms.", "Ms", "Mrs.", "Mrs", "Miss", "Mss.", "Mss"}
         # Gender-neutral titles (for extraction but not gender detection)
-        self.neutral_titles = {'Dr.', 'Dr', 'Prof.', 'Prof'}
+        self.neutral_titles = {"Dr.", "Dr", "Prof.", "Prof"}
 
         # Tier 2: Load census data into memory
         self.census_lookup = self._load_census_data(census_data_dir)
@@ -41,15 +37,15 @@ class GenderDetector:
         if not filepath.exists():
             return {}
 
-        with open(filepath, 'r') as f:
+        with open(filepath, "r") as f:
             names = json.load(f)
 
         name_counts = {}
         for entry in names:
-            name = entry['name'].upper()
+            name = entry["name"].upper()
             if name not in name_counts:
                 name_counts[name] = {}
-            name_counts[name][gender] = entry.get('count', 0)
+            name_counts[name][gender] = entry.get("count", 0)
 
         return name_counts
 
@@ -58,29 +54,26 @@ class GenderDetector:
         data_path = Path(data_dir)
 
         # Load male and female names with counts
-        male_counts = self._load_name_counts(data_path / "male_first_names.json", 'male')
-        female_counts = self._load_name_counts(data_path / "female_first_names.json", 'female')
+        male_counts = self._load_name_counts(data_path / "male_first_names.json", "male")
+        female_counts = self._load_name_counts(data_path / "female_first_names.json", "female")
 
         # Merge counts for names that appear in both genders
         all_names = set(male_counts.keys()) | set(female_counts.keys())
         name_counts = {}
         for name in all_names:
             name_counts[name] = {
-                'male': male_counts.get(name, {}).get('male', 0),
-                'female': female_counts.get(name, {}).get('female', 0),
+                "male": male_counts.get(name, {}).get("male", 0),
+                "female": female_counts.get(name, {}).get("female", 0),
             }
 
         # Build lookup by selecting gender with higher count
-        return {
-            name: 'male' if counts['male'] >= counts['female'] else 'female'
-            for name, counts in name_counts.items()
-        }
+        return {name: "male" if counts["male"] >= counts["female"] else "female" for name, counts in name_counts.items()}
 
     def _load_api_cache(self) -> Dict[str, str]:
         """Load cached API results from disk."""
         if self.api_cache_file.exists():
             try:
-                with open(self.api_cache_file, 'r') as f:
+                with open(self.api_cache_file, "r") as f:
                     return json.load(f)
             except Exception:
                 pass
@@ -89,7 +82,7 @@ class GenderDetector:
     def _save_api_cache(self):
         """Save API cache to disk."""
         try:
-            with open(self.api_cache_file, 'w') as f:
+            with open(self.api_cache_file, "w") as f:
                 json.dump(self.api_cache, f, indent=2)
         except Exception:
             pass
@@ -122,17 +115,13 @@ class GenderDetector:
     def _detect_from_title(self, name_text: str) -> Optional[str]:
         """Tier 1: Detect gender from titles."""
         # Combine all titles and sort by length (longest first) to avoid "Mr" matching "Mrs"
-        all_gendered_titles = [
-            (title, 'male') for title in self.male_titles
-        ] + [
-            (title, 'female') for title in self.female_titles
-        ]
+        all_gendered_titles = [(title, "male") for title in self.male_titles] + [(title, "female") for title in self.female_titles]
         # Sort by length descending
         all_gendered_titles.sort(key=lambda x: len(x[0]), reverse=True)
 
         # Check if name starts with any title
         for title, gender in all_gendered_titles:
-            if name_text.startswith(title + ' ') or name_text.startswith(title):
+            if name_text.startswith(title + " ") or name_text.startswith(title):
                 return gender
         return None
 
@@ -144,8 +133,8 @@ class GenderDetector:
         cleaned = name_text.strip()
 
         for title in sorted_titles:
-            if cleaned.startswith(title + ' ') or cleaned.startswith(title):
-                cleaned = cleaned[len(title):].strip()
+            if cleaned.startswith(title + " ") or cleaned.startswith(title):
+                cleaned = cleaned[len(title) :].strip()
                 break  # Only remove one title
 
         parts = cleaned.split()
@@ -162,16 +151,12 @@ class GenderDetector:
             return self.api_cache[cache_key]
 
         try:
-            response = requests.get(
-                "https://api.genderize.io",
-                params={'name': first_name},
-                timeout=5
-            )
+            response = requests.get("https://api.genderize.io", params={"name": first_name}, timeout=5)
             response.raise_for_status()
             data = response.json()
 
-            gender = data.get('gender')
-            probability = data.get('probability', 0)
+            gender = data.get("gender")
+            probability = data.get("probability", 0)
 
             # Only trust high-confidence results (>70%)
             if gender and probability >= 0.7:

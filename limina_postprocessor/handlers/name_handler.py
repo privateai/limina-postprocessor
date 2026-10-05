@@ -3,11 +3,13 @@
 
 import random
 import threading
+from pathlib import Path
+from typing import Dict, Optional
+
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
-from pathlib import Path
-from typing import Dict, Optional
+
 from .base_handler import BaseEntityHandler
 from .gender_detector import GenderDetector
 
@@ -18,24 +20,23 @@ class NameHandler(BaseEntityHandler):
     # Column holding the value substituted for each entity type. full_name is stored
     # as "first_name last_name", so a full name needs only that one column decoded.
     COLUMN_BY_TYPE = {
-        'NAME': 'full_name',
-        'NAME_MEDICAL_PROFESSIONAL': 'full_name',
-        'NAME_GIVEN': 'first_name',
-        'NAME_FAMILY': 'last_name',
+        "NAME": "full_name",
+        "NAME_MEDICAL_PROFESSIONAL": "full_name",
+        "NAME_GIVEN": "first_name",
+        "NAME_FAMILY": "last_name",
     }
 
     # Trailing generational suffixes, compared without a trailing period and upper-cased
     # (see _split_suffix). Bare "V" and "I" are deliberately absent: as a trailing token
     # they are far more often a middle initial than a generational marker, and stripping
     # an initial would change the name rather than preserve it.
-    NAME_SUFFIXES = frozenset({'JR', 'SR', 'II', 'III', 'IV'})
+    NAME_SUFFIXES = frozenset({"JR", "SR", "II", "III", "IV"})
 
     # Sampling budget: 100 probes total (as before), but at most 4 row group reads
     MAX_ROW_GROUP_READS = 4
     PROBES_PER_ROW_GROUP = 25
 
-    def __init__(self, dictionary_path: str, enable_api_gender: bool = False,
-                 census_data_dir: Optional[str] = None):
+    def __init__(self, dictionary_path: str, enable_api_gender: bool = False, census_data_dir: Optional[str] = None):
         """Initialize name handler with a memory-mapped parquet reader."""
         super().__init__()
 
@@ -71,23 +72,16 @@ class NameHandler(BaseEntityHandler):
         # _sample_row_group corrects this index as it learns what each row group really
         # holds, so it changes at run time and needs guarding once threads are in play.
         self._index_lock = threading.Lock()
-        self.row_groups = {'male': [], 'female': []}
+        self.row_groups = {"male": [], "female": []}
         self.mixed_row_groups = set()
         self._index_row_groups()
 
         # Initialize gender detector
-        self.gender_detector = GenderDetector(
-            census_data_dir=census_data_dir,
-            enable_api=enable_api_gender
-        )
+        self.gender_detector = GenderDetector(census_data_dir=census_data_dir, enable_api=enable_api_gender)
 
         # Honorifics, longest first so the longest match wins (see _split_title)
         self.sorted_titles = sorted(
-            self.gender_detector.male_titles
-            | self.gender_detector.female_titles
-            | self.gender_detector.neutral_titles,
-            key=len,
-            reverse=True
+            self.gender_detector.male_titles | self.gender_detector.female_titles | self.gender_detector.neutral_titles, key=len, reverse=True
         )
 
         # Global tracking to ensure NO repeats across documents. Threads share this one
@@ -99,28 +93,25 @@ class NameHandler(BaseEntityHandler):
 
     def __del__(self):
         """Close the parquet file handle on cleanup."""
-        if hasattr(self, 'parquet'):
+        if hasattr(self, "parquet"):
             self.parquet.close()
 
     @property
     def last_name_to_full(self):
         """Maps last name -> full name ("Smith" -> "John Smith"), for this document."""
-        return self._doc_dict('last_name_to_full')
+        return self._doc_dict("last_name_to_full")
 
     @property
     def first_name_to_full(self):
         """Maps first name -> full name ("John" -> "John Smith"), for this document."""
-        return self._doc_dict('first_name_to_full')
+        return self._doc_dict("first_name_to_full")
 
     def _index_row_groups(self):
         """Record which row groups can contain each gender, using parquet statistics."""
         metadata = self.parquet.metadata
 
         # Parquet column order need not match ours, so find gender by name
-        gender_col = next(
-            i for i in range(metadata.num_columns)
-            if metadata.row_group(0).column(i).path_in_schema == 'gender'
-        )
+        gender_col = next(i for i in range(metadata.num_columns) if metadata.row_group(0).column(i).path_in_schema == "gender")
 
         for row_group in range(metadata.num_row_groups):
             stats = metadata.row_group(row_group).column(gender_col).statistics
@@ -136,8 +127,8 @@ class NameHandler(BaseEntityHandler):
                 self.row_groups[single].append(row_group)
             else:
                 self.mixed_row_groups.add(row_group)
-                self.row_groups['male'].append(row_group)
-                self.row_groups['female'].append(row_group)
+                self.row_groups["male"].append(row_group)
+                self.row_groups["female"].append(row_group)
 
         # An empty pool means no row group was recognized, so every replacement
         # would fail later inside random.choice(). Fail here instead, with the
@@ -160,16 +151,16 @@ class NameHandler(BaseEntityHandler):
         pyarrow returns BYTE_ARRAY statistics as bytes on some versions and str on
         others, so comparisons against str keys must not depend on which is in use.
         """
-        return value.decode('utf-8', 'replace') if isinstance(value, bytes) else value
+        return value.decode("utf-8", "replace") if isinstance(value, bytes) else value
 
     def can_handle(self, entity_type: str) -> bool:
         """Check if this is a name entity."""
-        return entity_type in ['NAME', 'NAME_GIVEN', 'NAME_FAMILY', 'NAME_MEDICAL_PROFESSIONAL']
+        return entity_type in ["NAME", "NAME_GIVEN", "NAME_FAMILY", "NAME_MEDICAL_PROFESSIONAL"]
 
     def get_replacement(self, entity: Dict, context: Optional[Dict] = None) -> str:
         """Get replacement name from parquet via DuckDB with smart caching."""
-        entity_type = entity.get('best_label', entity.get('entity_type', ''))
-        original_text = entity.get('text', '').strip()
+        entity_type = entity.get("best_label", entity.get("entity_type", ""))
+        original_text = entity.get("text", "").strip()
 
         # Extract title if present
         title, cleaned_text = self._split_title(original_text)
@@ -209,7 +200,7 @@ class NameHandler(BaseEntityHandler):
 
     def _smart_match(self, entity_type: str, cleaned_text: str) -> Optional[str]:
         """Try to match against previously seen name components."""
-        is_full_name = entity_type in ['NAME', 'NAME_MEDICAL_PROFESSIONAL']
+        is_full_name = entity_type in ["NAME", "NAME_MEDICAL_PROFESSIONAL"]
 
         # Check last name match
         if cleaned_text in self.last_name_to_full:
@@ -225,7 +216,7 @@ class NameHandler(BaseEntityHandler):
 
     def _cache_components(self, entity_type: str, original_text: str, replacement: str):
         """Cache name components for future smart matching."""
-        if entity_type not in ['NAME', 'NAME_MEDICAL_PROFESSIONAL']:
+        if entity_type not in ["NAME", "NAME_MEDICAL_PROFESSIONAL"]:
             return
 
         parts = replacement.split()
@@ -240,13 +231,13 @@ class NameHandler(BaseEntityHandler):
         gender = self.gender_detector.detect_gender(original_text)
 
         # Select gender pool, random choice if unknown
-        if gender in ('male', 'female'):
+        if gender in ("male", "female"):
             target_gender = gender
         else:
-            target_gender = 'male' if random.random() < 0.5 else 'female'
+            target_gender = "male" if random.random() < 0.5 else "female"
 
         # Only the component we actually use needs to be decoded
-        column = self.COLUMN_BY_TYPE.get(entity_type, 'full_name')
+        column = self.COLUMN_BY_TYPE.get(entity_type, "full_name")
 
         # Keep trying until we find an unused name
         fallback = None
@@ -276,9 +267,7 @@ class NameHandler(BaseEntityHandler):
         # If we couldn't find unused name in 100 probes (very unlikely), use it anyway
         # This should never happen with 1.2B names
         if fallback is None:
-            raise RuntimeError(
-                f"No {target_gender} names available in {self.dictionary_path}"
-            )
+            raise RuntimeError(f"No {target_gender} names available in {self.dictionary_path}")
 
         return self._match_capitalization(original_text, fallback)
 
@@ -299,15 +288,13 @@ class NameHandler(BaseEntityHandler):
         A concurrent update can therefore only make us filter a row group that no longer
         needs it, which wastes a little work and cannot produce a wrong gender.
         """
-        other = 'female' if gender == 'male' else 'male'
+        other = "female" if gender == "male" else "male"
         reader = self._reader()
 
         while True:
             with self._index_lock:
                 if not self.row_groups[gender]:
-                    raise RuntimeError(
-                        f"No {gender} names available in {self.dictionary_path}"
-                    )
+                    raise RuntimeError(f"No {gender} names available in {self.dictionary_path}")
                 row_group = random.choice(self.row_groups[gender])
                 needs_filtering = row_group in self.mixed_row_groups
 
@@ -315,9 +302,9 @@ class NameHandler(BaseEntityHandler):
                 table = reader.read_row_group(row_group, columns=[column])
                 return table.column(column)
 
-            table = reader.read_row_group(row_group, columns=[column, 'gender'])
+            table = reader.read_row_group(row_group, columns=[column, "gender"])
             total_rows = table.num_rows
-            table = table.filter(pc.equal(table.column('gender'), gender))
+            table = table.filter(pc.equal(table.column("gender"), gender))
 
             if table.num_rows == 0:
                 # Holds none of this gender, so stop offering it for this gender
@@ -352,7 +339,7 @@ class NameHandler(BaseEntityHandler):
 
         Readers are dropped when their thread exits, which for a pool is at shutdown.
         """
-        reader = getattr(self._local, 'reader', None)
+        reader = getattr(self._local, "reader", None)
         if reader is None:
             reader = pq.ParquetFile(
                 self.dictionary_path,
@@ -399,7 +386,7 @@ class NameHandler(BaseEntityHandler):
         separator = ", " if base.endswith(",") else " "
         # Commas and any space before them, so "Brown , Jr." does not leave the base name
         # with a trailing space and miss the cache entry for a plain "Brown".
-        return base.rstrip(', '), f"{separator}{last}"
+        return base.rstrip(", "), f"{separator}{last}"
 
     def _split_title(self, name: str) -> tuple:
         """Split a leading honorific off a name, returning (title, remaining_name).
@@ -410,8 +397,8 @@ class NameHandler(BaseEntityHandler):
         """
         name = name.strip()
         for title in self.sorted_titles:
-            if name.startswith(title) and name[len(title):len(title) + 1].isspace():
-                return title, name[len(title):].strip()
+            if name.startswith(title) and name[len(title) : len(title) + 1].isspace():
+                return title, name[len(title) :].strip()
         return None, name
 
     def _match_capitalization(self, original: str, replacement: str) -> str:

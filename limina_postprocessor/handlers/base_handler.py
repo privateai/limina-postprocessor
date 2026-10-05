@@ -20,7 +20,7 @@ class BaseEntityHandler(ABC):
     @property
     def cache(self) -> Dict:
         """This thread's exact-match cache, for the document it is currently processing."""
-        return self._doc_dict('cache')
+        return self._doc_dict("cache")
 
     def _doc_dict(self, name: str) -> Dict:
         """Fetch one of this thread's per-document dicts, creating it on first touch."""
