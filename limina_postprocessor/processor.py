@@ -21,8 +21,9 @@ import os
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from itertools import islice
 from pathlib import Path
-from collections import Counter
+from collections import Counter, deque
 
 # Import handlers
 from .handlers import NameHandler
@@ -48,6 +49,11 @@ class DEIDPostProcessor:
     # buys 15% because the row group decode is memory-bandwidth bound, while each extra
     # thread holds another decoded row group in flight. Tuned per host if it matters.
     DEFAULT_MAX_WORKERS = 8
+
+    # Documents kept queued per worker in iter_documents. Above 1 so a thread that
+    # finishes early has work waiting, but bounded, so a backfill streams instead of
+    # materializing every document and result up front.
+    QUEUE_DEPTH_PER_WORKER = 2
 
     def __init__(self, name_dictionary_path=None, enable_names=True, enable_api_gender=False):
         """
@@ -218,10 +224,8 @@ class DEIDPostProcessor:
     def process_documents(self, documents, workers=None):
         """Process many documents at once, returning results in input order.
 
-        Threads, not processes, so every worker shares one `used_names_global` and the
-        cross-document uniqueness guarantee still holds. Measured 4.8x on 8 workers.
-        Output is NOT reproducible across worker counts — threads interleave their draws
-        from the shared random stream. See "Parallel Processing" in README.md.
+        Collects everything into a list, so peak memory scales with the number of
+        documents. For a large run, iterate iter_documents instead.
 
         Args:
             documents: iterable of DEID outputs, as accepted by process_document
@@ -231,21 +235,67 @@ class DEIDPostProcessor:
         Returns:
             list of processed documents, in the same order as `documents`
         """
-        if workers is not None and workers < 1:
-            raise ValueError(f"workers must be >= 1, got {workers}")
+        return list(self.iter_documents(documents, workers=workers))
 
-        documents = list(documents)
+    def iter_documents(self, documents, workers=None):
+        """Process documents on a thread pool, yielding results in input order.
+
+        Streams: at most workers * QUEUE_DEPTH_PER_WORKER documents are held at once, so
+        `documents` may be a generator over more data than fits in memory. This bounds the
+        documents in flight only — it does nothing for `used_names_global`, which by design
+        accumulates every name ever handed out and is the dominant cost at scale.
+
+        Threads, not processes, so every worker shares one `used_names_global` and the
+        cross-document uniqueness guarantee still holds. Measured 4.8x on 8 workers.
+        Output is NOT reproducible across worker counts — threads interleave their draws
+        from the shared random stream. See "Parallel Processing" in README.md.
+
+        Args:
+            documents: iterable of DEID outputs, as accepted by process_document
+            workers: thread count; defaults to the core count capped at
+                     DEFAULT_MAX_WORKERS
+
+        Yields:
+            processed documents, in the same order as `documents`
+        """
+        # Resolved here rather than in the generator body so that a bad worker count
+        # raises at the call site instead of on the first next().
+        return self._iter_documents(documents, self._resolve_workers(workers))
+
+    def _resolve_workers(self, workers):
+        """Validate an explicit worker count, or choose one for this host."""
         if workers is None:
-            # Cap, not a target: never more threads than cores, never more than the cap.
-            workers = min(self.DEFAULT_MAX_WORKERS, os.cpu_count() or 1)
+            # A cap, not a target: never more threads than cores, never more than the cap
+            return min(self.DEFAULT_MAX_WORKERS, os.cpu_count() or 1)
+        if workers < 1:
+            raise ValueError(f"workers must be >= 1, got {workers}")
+        return workers
 
-        # Threads cost more than they save on a single document, and the pool would only
-        # add setup work.
-        if workers == 1 or len(documents) < 2:
-            return [self.process_document(doc) for doc in documents]
+    def _iter_documents(self, documents, workers):
+        """Generator half of iter_documents; see there for the contract."""
+        if workers == 1:
+            # No pool at all: one thread gains nothing and the setup is pure cost.
+            for document in documents:
+                yield self.process_document(document)
+            return
+
+        # Sliding window of in-flight futures. ThreadPoolExecutor.map collects its input
+        # immediately, which is the thing being avoided here, so submit by hand and keep
+        # the window topped up. Taking from the left is what preserves input order.
+        remaining = iter(documents)
+        in_flight = deque()
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            return list(pool.map(self.process_document, documents))
+            window = workers * self.QUEUE_DEPTH_PER_WORKER
+            for document in islice(remaining, window):
+                in_flight.append(pool.submit(self.process_document, document))
+
+            for document in remaining:
+                yield in_flight.popleft().result()
+                in_flight.append(pool.submit(self.process_document, document))
+
+            while in_flight:
+                yield in_flight.popleft().result()
 
     def _record_entity(self, entity_type, handler):
         """Fold one entity into the run statistics.

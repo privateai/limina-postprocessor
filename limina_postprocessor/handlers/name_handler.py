@@ -24,6 +24,12 @@ class NameHandler(BaseEntityHandler):
         'NAME_FAMILY': 'last_name',
     }
 
+    # Trailing generational suffixes, compared without a trailing period and upper-cased
+    # (see _split_suffix). Bare "V" and "I" are deliberately absent: as a trailing token
+    # they are far more often a middle initial than a generational marker, and stripping
+    # an initial would change the name rather than preserve it.
+    NAME_SUFFIXES = frozenset({'JR', 'SR', 'II', 'III', 'IV'})
+
     # Sampling budget: 100 probes total (as before), but at most 4 row group reads
     MAX_ROW_GROUP_READS = 4
     PROBES_PER_ROW_GROUP = 25
@@ -153,6 +159,12 @@ class NameHandler(BaseEntityHandler):
         # Extract title if present
         title, cleaned_text = self._split_title(original_text)
 
+        # And any trailing generational suffix. Stripped before the cache key is built, so
+        # "James Wilson Sr" and "James Wilson" resolve to one person the way "Dr. James
+        # Wilson" already does — and so the suffix is not mistaken for the surname when
+        # components are cached for smart matching.
+        cleaned_text, suffix = self._split_suffix(cleaned_text)
+
         # Check exact cache first
         cache_key = (entity_type, cleaned_text)
         if cache_key in self.cache:
@@ -173,6 +185,10 @@ class NameHandler(BaseEntityHandler):
         # Add title back if present
         if title:
             replacement = f"{title} {replacement}"
+
+        # Suffix last, so a name carrying both comes back as "Dr. New Name Sr"
+        if suffix:
+            replacement = f"{replacement}{suffix}"
 
         return replacement
 
@@ -309,6 +325,32 @@ class NameHandler(BaseEntityHandler):
             self.row_groups[gender].remove(row_group)
         except ValueError:
             pass
+
+    def _split_suffix(self, name: str) -> tuple:
+        """Split a trailing generational suffix off a name, returning (name, suffix).
+
+        The mirror of _split_title, and needed for the same reason: DEID puts the suffix
+        inside the name entity ("James Wilson Sr"), so a replacement drawn from the
+        dictionary drops it and the text loses a token it started with.
+
+        Matched as a whole trailing token, so surnames that merely end in those letters
+        ("Sriram", "Junior") are left intact. `suffix` carries the separator that preceded
+        it, so reattaching is concatenation and "Wilson, Jr." does not come back as
+        "Wilson Jr.". Returns (name, None) when there is nothing to split.
+        """
+        parts = name.rstrip().rsplit(None, 1)
+        if len(parts) != 2:
+            # One token or empty: a bare "Jr" is all there is to go on, so keep it as the
+            # name rather than strip it and have nothing left to replace.
+            return name, None
+
+        head, last = parts
+        if last.rstrip(".").upper() not in self.NAME_SUFFIXES:
+            return name, None
+
+        base = head.rstrip()
+        separator = ", " if base.endswith(",") else " "
+        return base.rstrip(","), f"{separator}{last}"
 
     def _split_title(self, name: str) -> tuple:
         """Split a leading honorific off a name, returning (title, remaining_name).
