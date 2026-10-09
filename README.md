@@ -154,6 +154,89 @@ on international data unless Tier 3 is enabled.
 
 ---
 
+## Name Dictionaries
+
+Two dictionaries ship with the repo. `DEFAULT_DICTIONARY` still points at
+`name_dictionary_1b_filtered.parquet`; pass `name_dictionary_path` explicitly to use
+the other.
+
+| | `name_dictionary_1b_filtered` | `name_dictionary_1b_expanded` |
+|---|---|---|
+| Rows | 1,203,974,287 | 997,628,058 |
+| File size | 4.04 GB | 3.88 GB |
+| Row groups | 9,659 | 7,938 |
+| Distinct first names | 6,782 | **11,978** |
+| Distinct last names | 162,253 | 162,253 |
+| Distinct `full_name` | 1,096,369,276 | **997,628,058** |
+| Duplicate `full_name` | 107,605,011 (**8.94%**) | **0** |
+| Famous-name blocklist | applied (unknown list) | applied (11,661,376 names) |
+| First-name source | US Census | US Census + Ontario birth registrations |
+| Surname source | US Census | US Census (unchanged) |
+
+Both figures are exhaustive `count(DISTINCT ...)` over every row, not sampled.
+
+`expanded` has a block list of famous names applied: of its 11,661,376 distinct
+entries, 2,372,181 matched a generated name and were removed (0.24% of rows). Matching
+is case-insensitive on `full_name`. Verified by anti-join — zero blocked names remain.
+
+### Distribution
+
+**Surnames paired per first name**
+
+| Dictionary | min | p25 | median | p75 | max | mean | stddev |
+|---|---|---|---|---|---|---|---|
+| filtered | 144,989 | 162,006 | 162,195 | 162,241 | 324,500 | 177,525 | 47,282 |
+| expanded | 67,676 | 82,216 | 82,252 | 84,970 | 85,000 | 83,288 | 1,665 |
+
+**First names paired per surname**
+
+| Dictionary | min | p25 | median | p75 | max | mean | stddev |
+|---|---|---|---|---|---|---|---|
+| filtered | 3,563 | 7,429 | 7,445 | 7,451 | 7,455 | 7,420 | 107 |
+| expanded | 4,133 | 6,152 | 6,159 | 6,162 | 6,164 | 6,149 | 46 |
+
+**By gender**
+
+| Dictionary | female rows | female firsts | male rows | male firsts |
+|---|---|---|---|---|
+| filtered | 649,298,155 | 4,018 | 554,676,132 | 3,437 |
+| expanded | 534,303,800 | 6,411 | 463,324,258 | 5,567 |
+
+Three differences matter:
+
+1. **`filtered` is a full cross join, `expanded` is a bounded one.** In `filtered`
+   almost every first name pairs with the whole 162,253-surname pool (median 162,195).
+   In `expanded` each first name pairs with ~83,288 of them — 51% — which is what keeps
+   11,978 first names inside a 1B-row budget. Every surname still appears, so the
+   `NAME_FAMILY` pool is unchanged; only the set of *pairings* is smaller.
+
+2. **`filtered`'s 324,500 maximum is the duplicate bug.** That is ~2 × 162,253: its 673
+   unisex first names appear in both the male and female blocks and pair with the same
+   surnames twice, producing the 107.6M duplicate `full_name` rows. `expanded` assigns
+   each first name exactly one gender, so `full_name` is unique by construction — which
+   is why its distinct count equals its row count exactly.
+
+3. **`expanded` is near-uniform, `filtered` is skewed.** Compare the stddevs: 1,665 on a
+   mean of 83,288 versus 47,282 on 177,525. Neither mirrors real-world name popularity —
+   source frequency data is used only to assign gender, then discarded, so sampling is
+   effectively uniform over names in both. `expanded` is simply more evenly balanced.
+
+### Caveats on the expanded pool
+
+- **Ontario birth registrations, not US data.** The extra 5,206 first names come from
+  Ontario's open vital-statistics data (1917–2024), licensed OGL-ON 1.0. Many are
+  common in the US too, but the genuinely incremental ones skew French-Canadian
+  (`Mathieu`, `Sylvie`, `Sébastien`). For a US corpus this is a realism trade for pool
+  size. US SSA baby-name data would push the pool into the tens of thousands without
+  leaving the US, and is public domain.
+- **Accents are preserved** (113 names, e.g. `André`). Folding them to ASCII would
+  collide with existing entries and cost first-name uniqueness.
+- **Gender detection is unaffected.** Tier 2 still knows only the 6,782 names in
+  `census_data/`, but that lookup runs on the *input* name being replaced, not on
+  dictionary output, so the larger pool neither helps nor hurts it.
+
+---
+
 ## Installation
 
 ### Prerequisites
@@ -445,11 +528,15 @@ is used would burn the 162K-surname pool at full-name rates.
 Uniqueness holds only while the relevant pool has unused values left. The pools are
 very different sizes:
 
-| Entity Type | Distinct values available | Safe at 700M? |
-|---|---|---|
-| `NAME` / `NAME_MEDICAL_PROFESSIONAL` | ~1.2B | Yes |
-| `NAME_FAMILY` | ~162K | **No** |
-| `NAME_GIVEN` | ~7,500 (3,437 male / 4,018 female) | **No** |
+| Entity Type | `filtered` | `expanded` | Safe at 700M? |
+|---|---|---|---|
+| `NAME` / `NAME_MEDICAL_PROFESSIONAL` | ~1.10B distinct | ~998M distinct | Yes |
+| `NAME_FAMILY` | 162,253 | 162,253 | **No** |
+| `NAME_GIVEN` | 6,782 (3,437 male / 4,018 female) | 11,978 (5,567 male / 6,411 female) | **No** |
+
+`expanded` raises the `NAME_GIVEN` ceiling by 1.77× but does not remove it — see
+[Name Dictionaries](#name-dictionaries). Note that `filtered` holds 1.2B *rows* but only
+1,096,369,276 distinct full names.
 
 ⚠️ **When a pool is exhausted, uniqueness fails silently.** All 100 probes miss, and
 the function returns `fallback` — a value that is already in `used_names_global` — and
@@ -473,10 +560,12 @@ Two further constraints apply beyond the sample-corpus scale this package is ver
   with headroom above that or it will swap.
 - **Parallelism breaks the guarantee.** Each worker process holds its own
   `used_names_global`, so two workers can independently emit the same name. There is
-  currently no shared or partitioned uniqueness store. `full_name` values *are*
-  globally unique in the parquet (verified over 1.5M sampled rows), so assigning each
-  worker a disjoint subset of row groups would make cross-worker uniqueness hold by
-  construction — this is not implemented.
+  currently no shared or partitioned uniqueness store. Assigning each worker a disjoint
+  subset of row groups would make cross-worker uniqueness hold by construction, but
+  **only on `name_dictionary_1b_expanded`**, where `full_name` is genuinely unique
+  (997,628,058 distinct over 997,628,058 rows, counted exhaustively). On
+  `name_dictionary_1b_filtered` that argument does not hold: 8.94% of its rows are
+  duplicate full names (due to unisex names) so two workers on disjoint row groups can still collide. Partitioning is not implemented either way.
 
 <a name="honorific-handling"></a>
 ### Honorific Handling
@@ -556,7 +645,8 @@ limina_postprocessor/
 ├── processor.py                   # DEIDPostProcessor: entity positions, index
 │                                  #   offsets, handler dispatch
 ├── data/
-│   ├── name_dictionary_1b_filtered.parquet  # 1.2B names, 3.8GB, 9,659 row groups
+│   ├── name_dictionary_1b_filtered.parquet  # 1.2B names, 4.04GB, 9,659 row groups
+│   ├── name_dictionary_1b_expanded.parquet  # 998M names, 3.88GB, 7,938 row groups
 │   └── census_data/
 │       ├── male_first_names.json            # 3,437 names
 │       ├── female_first_names.json          # 4,018 names
