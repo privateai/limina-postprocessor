@@ -1,3 +1,8 @@
 # Core dependencies
 pyarrow>=10.0.0
 requests>=2.28.0
+
+# For the dictionary scripts in tools/ (blocklist removal, dictionary builds) only.
+# The post-processor itself never imports it, so skip this line if you only run the
+# pipeline: pip install duckdb
+# duckdb>=1.0.0

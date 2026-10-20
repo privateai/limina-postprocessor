@@ -35,6 +35,10 @@ dev = [
     "black>=22.0.0",
     "flake8>=5.0.0",
 ]
+# For the dictionary scripts in tools/ only; the post-processor itself never imports it.
+tools = [
+    "duckdb>=1.0.0",
+]
 
 [project.scripts]
 limina-postprocessor = "limina_postprocessor.processor:main"
