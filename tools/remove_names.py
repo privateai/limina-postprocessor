@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Remove a list of names from a built dictionary parquet, without rebuilding it.
 
-Rewrites an new dictionary from the one that already shipped. Needs ``pip install duckdb``.
+Rewrites a new dictionary from the one that already shipped. Needs ``pip install duckdb``.
 
-Matching ignores case and extra whitespace. ``--match auto`` routes by entry shape:
-"Taylor Swift" drops rows with that full_name, "Swift" drops rows with that first_name
-or last_name. ``--match full|first|last|component`` forces one interpretation.
+Matching ignores case and extra whitespace, and routes by entry shape: "Taylor Swift"
+drops rows with that full_name, "Swift" drops rows with that first_name or last_name.
+(``remove_names(match=...)`` can force one column; the CLI does not expose it.)
 
 Rewriting the shipped 1.2B rows takes ~5 minutes and spills ~60 GB (``kept_rows_sql``
 says why it sorts). It also repacks row groups, which costs the boundary alignment that
@@ -13,10 +13,9 @@ kept gender runs apart (638 of 9,659 mixed becomes 2,153 of 9,798), and the hole
 behind compress worse (4.04 -> 4.13 GB) against a file already at the LFS size limit.
 
 Usage:
-    python tools/remove_names.py --in dict.parquet --names blocked.txt --dry-run
-    python tools/remove_names.py --in dict.parquet --names blocked.txt --in-place --verify
-    python tools/remove_names.py --in dict.parquet --out clean.parquet \
-        --names surnames.txt --match last
+    python tools/remove_names.py blocked.txt              # preview, writes nothing
+    python tools/remove_names.py blocked.txt --in-place    # clean the shipped dictionary
+    python tools/remove_names.py blocked.txt --out clean.parquet
 """
 
 import argparse
@@ -29,6 +28,10 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from build_name_dictionary import load_blocklist, load_surnames, verify
+
+DATA = Path(__file__).resolve().parent.parent / "limina_postprocessor" / "data"
+DEFAULT_DICTIONARY = DATA / "name_dictionary_1b_filtered.parquet"
+CENSUS_DIR = DATA / "census_data"
 
 # "component" bans a name in either position.
 MATCH_COLUMNS = {
@@ -251,70 +254,51 @@ def report(source, target, stats) -> None:
 
 
 def main(argv=None) -> int:
-    repo = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--in", dest="source", required=True, type=Path, help="dictionary parquet to read")
-    parser.add_argument("--out", type=Path, help="parquet to write")
-    parser.add_argument("--in-place", action="store_true", help="replace --in once the rewrite (and --verify) succeeds")
-    parser.add_argument("--dry-run", action="store_true", help="report what the list hits and write nothing")
-    parser.add_argument("--names", required=True, type=Path, help="names to remove (one per line, or JSON)")
-    parser.add_argument("--match", choices=MATCH_MODES, default="auto", help="which column(s) a name is matched against")
-    parser.add_argument("--row-group-size", type=int, help="rows per output row group (default: the source's)")
-    parser.add_argument("--threads", type=int, help="cap DuckDB's thread count (default: all cores)")
-    parser.add_argument("--temp-dir", type=Path, help="where the sort spills, ~60 GB (default: beside the output)")
-    parser.add_argument("--force", action="store_true", help="overwrite --out if it exists")
-    parser.add_argument("--verify", action="store_true", help="check the output's layout invariants before keeping it")
-    parser.add_argument("--census-dir", type=Path, default=repo / "limina_postprocessor" / "data" / "census_data", help="census inputs, for --verify")
+    parser.add_argument("blocklist", type=Path, help="names to remove (one per line, or JSON)")
+    parser.add_argument("--dictionary", type=Path, default=DEFAULT_DICTIONARY, help="parquet to clean (default: the shipped dictionary)")
+    parser.add_argument("--in-place", action="store_true", help="replace the dictionary (default: preview only)")
+    parser.add_argument("--temp-dir", type=Path, help="where the sort spills, ~60 GB (default: beside the dictionary)")
     args = parser.parse_args(argv)
 
-    chosen = [name for name, on in (("--out", args.out is not None), ("--in-place", args.in_place), ("--dry-run", args.dry_run)) if on]
-    if len(chosen) != 1:
-        parser.error(f"give exactly one of --out, --in-place, --dry-run (got {', '.join(chosen) or 'none'})")
+    source = args.dictionary
+    # Write a sibling file and rename it, so readers see one file or the other. The temp
+    # file is ours, so a leftover from an earlier run is overwritten rather than refused.
+    target = source.with_suffix(".cleaning.parquet") if args.in_place else None
 
-    # Write a sibling file and rename, so readers see the old file or the new one.
-    target = args.out
-    if args.in_place:
-        target = args.source.with_suffix(".cleaning.parquet")
-    elif target is not None and target.resolve() == args.source.resolve():
-        parser.error("--out would overwrite --in; use --in-place for that")
-    if target is not None:
-        if target.exists() and not args.force:
-            parser.error(f"{target} exists (use --force to overwrite)")
-        target.parent.mkdir(parents=True, exist_ok=True)
+    # Spill beside the dictionary, not into ``.tmp`` under the current directory.
+    temp_dir = args.temp_dir or (source.parent if target is not None else None)
 
-    # Spill beside the output, not into ``.tmp`` under the current directory.
-    temp_dir = args.temp_dir or (target.parent if target is not None else None)
-
-    names = load_names(args.names)
+    names = load_names(args.blocklist)
     # Flushed: the scan and write that follow run for minutes without output.
-    print(f"removal list         : {len(names):,} names from {args.names}", flush=True)
+    print(f"removal list         : {len(names):,} names from {args.blocklist}", flush=True)
     if temp_dir is not None:
         print(f"sort scratch         : {temp_dir} (~60 GB for a 1.2B-row dictionary)", flush=True)
 
     try:
-        stats = remove_names(args.source, target, names, args.match, args.row_group_size, args.threads, temp_dir)
+        stats = remove_names(source, target, names, temp_dir=temp_dir)
     except ValueError as error:
         parser.error(str(error))
 
-    report(args.source, target, stats)
+    report(source, target, stats)
 
-    if args.verify:
-        # Surnames the list removed on purpose are not expected to survive; verify()
-        # catches any others that vanished.
-        measured = stats["measured"]
-        expected = measured["surnames"] - measured.get("names_last_name", 0)
-        shipped = len(load_surnames(args.census_dir))
-        if expected != shipped:
-            print(f"expected surnames    : {expected:,} (census ships {shipped:,})")
-        if not verify(target, expected):
-            if args.in_place:
-                print(f"\nNOT replacing {args.source}; the rewrite is at {target}")
-            return 1
+    if target is None:
+        print("preview only         : pass --in-place to write the result")
+        return 0
 
-    if args.in_place:
-        # Atomic within a filesystem.
-        target.replace(args.source)
-        print(f"replaced             : {args.source}")
+    # Surnames the list removed on purpose are not expected to survive; verify() catches
+    # any others that vanished. Always run: the swap below cannot be undone.
+    measured = stats["measured"]
+    expected = measured["surnames"] - measured.get("names_last_name", 0)
+    shipped = len(load_surnames(CENSUS_DIR))
+    if expected != shipped:
+        print(f"expected surnames    : {expected:,} (census ships {shipped:,})")
+    if not verify(target, expected):
+        print(f"\nNOT replacing {source}; the rewrite is at {target}")
+        return 1
+
+    target.replace(source)  # atomic within a filesystem
+    print(f"replaced             : {source}")
     return 0
 
 
