@@ -96,9 +96,7 @@ lines are comments.
 **Preview first** — this reads the dictionary and changes nothing (~15 seconds):
 
 ```bash
-python3 tools/remove_names.py \
-    --in limina_postprocessor/data/name_dictionary_1b_filtered.parquet \
-    --names blocked.txt --dry-run
+python3 tools/remove_names.py blocked.txt
 ```
 
 ```
@@ -116,9 +114,7 @@ way the dictionary stores names before rewriting 4GB.
 **Then apply it:**
 
 ```bash
-python3 tools/remove_names.py \
-    --in limina_postprocessor/data/name_dictionary_1b_filtered.parquet \
-    --names blocked.txt --in-place --verify
+python3 tools/remove_names.py blocked.txt --in-place
 ```
 
 Before you run it:
@@ -126,12 +122,12 @@ Before you run it:
 - **Takes ~5 minutes** and needs **~4GB of free disk for the new file plus ~60GB of
   scratch space**. Relocate the scratch with `--temp-dir /path/with/room`.
 - **Interrupted runs are safe.** The rewrite goes to a temporary file and only replaces
-  the dictionary once it is complete and `--verify` passes.
+  the dictionary once it is complete and passes a layout check.
 - **Your pipeline needs no change** — the dictionary path is the same as before.
 - **`git lfs pull` restores the original file**, so keep `blocked.txt` in version control
   and re-run this step after a fresh clone.
-- Use `--out clean.parquet` instead of `--in-place` to keep both files, then pass
-  `--dictionary clean.parquet` (or `name_dictionary_path=...`) to the post-processor.
+- **To trial it first**, copy the dictionary and clean the copy instead:
+  `python3 tools/remove_names.py blocked.txt --dictionary /tmp/copy.parquet --in-place`.
 
 ---
 
@@ -398,9 +394,7 @@ file.
 **Solution:**
 ```bash
 # send the scratch space somewhere with room
-python3 tools/remove_names.py \
-    --in limina_postprocessor/data/name_dictionary_1b_filtered.parquet \
-    --names blocked.txt --in-place --verify --temp-dir /path/with/room
+python3 tools/remove_names.py blocked.txt --in-place --temp-dir /path/with/room
 
 # a failed run leaves the dictionary untouched; remove the partial rewrite
 rm -f limina_postprocessor/data/name_dictionary_1b_filtered.cleaning.parquet

@@ -236,9 +236,7 @@ with `#` are comments.
 Check what a list would remove before committing to it:
 
 ```bash
-python tools/remove_names.py \
-    --in limina_postprocessor/data/name_dictionary_1b_filtered.parquet \
-    --names blocked.txt --dry-run
+python3 tools/remove_names.py blocked.txt
 ```
 
 ```
@@ -256,12 +254,10 @@ A name that matches 0 rows was simply never in the dictionary — many well-know
 are already absent from the filtered file so a zero is not an error. Use this to
 confirm a list is spelled the way the dictionary stores it before you rewrite 4GB.
 
-Then clean the dictionary in place:
+Running it with no other arguments only previews. To apply it, add `--in-place`:
 
 ```bash
-python tools/remove_names.py \
-    --in limina_postprocessor/data/name_dictionary_1b_filtered.parquet \
-    --names blocked.txt --in-place --verify
+python3 tools/remove_names.py blocked.txt --in-place
 ```
 
 Takes about 5 minutes for the full 1.2B-row dictionary. **Free disk needed: ~4GB for the
@@ -271,12 +267,12 @@ sample from). The scratch space goes next to the output file by default; send it
 somewhere with more room with `--temp-dir`:
 
 ```bash
-python tools/remove_names.py ... --temp-dir /path/with/room
+python3 tools/remove_names.py blocked.txt --in-place --temp-dir /path/with/room
 ```
 
 The rewrite goes to a temporary file and only replaces the dictionary once it is complete
-and `--verify` passes so an interrupted run leaves your dictionary untouched. Run your
-pipeline exactly as before afterwards - the path has not changed.
+and passes a layout check so an interrupted or failed run leaves your dictionary
+untouched. Run your pipeline exactly as before afterwards - the path has not changed.
 
 Notes:
 
@@ -286,8 +282,9 @@ Notes:
   so the cleaning step can be replayed after any fresh clone.
 - **The file can grow slightly** (4.04GB → 4.13GB in testing) even though it holds fewer
   rows, because removing rows makes the remaining data compress less well.
-- Use `--out clean.parquet` instead of `--in-place` to keep both files, then pass
-  `--dictionary clean.parquet` to the post-processor.
+- **To trial it without touching the shipped file**, copy the dictionary and clean the
+  copy: `cp limina_postprocessor/data/name_dictionary_1b_filtered.parquet /tmp/copy.parquet`
+  then `python3 tools/remove_names.py blocked.txt --dictionary /tmp/copy.parquet --in-place`.
 
 ---
 
