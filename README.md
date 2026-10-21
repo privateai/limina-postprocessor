@@ -85,7 +85,7 @@ Replaces name entities with synthetic names from a 1.2B name dictionary.
 
 6. **Honorific Handling:** see [Honorific Handling](#honorific-handling)
 
-**Performance** (measured on the 1.2B / 3.8GB dictionary, single process):
+**Performance** (measured on the 1.2B / 4.2GB dictionary, single process):
 - **Initialization:** ~0.05s (reads parquet metadata only, no data scan)
 - **Per generated name:** `NAME` 2.78ms · `NAME_FAMILY` 1.50ms · `NAME_GIVEN` 0.92ms
 - **Per document:** ~7.9ms on the sample corpus (~4 name entities each)
@@ -168,7 +168,7 @@ pip install pyarrow requests
 
 ### Download the 1.2B Name Dictionary
 
-The dictionary is pre-generated and stored in the repository using Git LFS (Large File Storage) due to its size (3.8GB).
+The dictionary is pre-generated and stored in the repository using Git LFS (Large File Storage) due to its size (4.2GB).
 
 **Option 1: Clone repo with Git LFS (Recommended)**
 ```bash
@@ -188,7 +188,7 @@ cd limina-postprocessor
 
 # Verify dictionary was downloaded
 ls -lh limina_postprocessor/data/name_dictionary_1b_filtered.parquet
-# Should show ~3.8GB
+# Should show ~4.2GB
 ```
 
 **Option 2: Pull LFS files in existing repo**
@@ -353,7 +353,7 @@ payload = {
 ### PyArrow Integration
 
 **Why pure PyArrow?**
-- Memory-maps the 3.8GB parquet file; row groups are decoded only when sampled
+- Memory-maps the 4.2GB parquet file; row groups are decoded only when sampled
 - Memory usage: ~50MB (vs 192GB if loaded in-memory)
 - One dependency instead of two — no SQL engine needed for a single-table lookup
 - **~214× faster than previous design.** `LIMIT 1 OFFSET n` combined
@@ -362,7 +362,7 @@ payload = {
 
 **Sampling Strategy (Random Row Group):**
 
-The dictionary has 9,659 row groups of ~124K rows each. A row group is the smallest
+The dictionary has 9,525 row groups of ~124K rows each. A row group is the smallest
 unit parquet can decode, so sampling works at that granularity:
 
 ```python
@@ -474,9 +474,9 @@ Two further constraints apply beyond the sample-corpus scale this package is ver
 - **Parallelism breaks the guarantee.** Each worker process holds its own
   `used_names_global`, so two workers can independently emit the same name. There is
   currently no shared or partitioned uniqueness store. `full_name` values *are*
-  globally unique in the parquet (verified over 1.5M sampled rows), so assigning each
-  worker a disjoint subset of row groups would make cross-worker uniqueness hold by
-  construction — this is not implemented.
+  globally unique in the parquet (1,197,156,537 rows, 1,197,156,537 distinct — a full
+  scan, not a sample), so assigning each worker a disjoint subset of row groups would
+  make cross-worker uniqueness hold by construction — this is not implemented.
 
 <a name="honorific-handling"></a>
 ### Honorific Handling
@@ -556,11 +556,11 @@ limina_postprocessor/
 ├── processor.py                   # DEIDPostProcessor: entity positions, index
 │                                  #   offsets, handler dispatch
 ├── data/
-│   ├── name_dictionary_1b_filtered.parquet  # 1.2B names, 3.8GB, 9,659 row groups
+│   ├── name_dictionary_1b_filtered.parquet  # 1.2B names, 4.2GB, 9,525 row groups
 │   └── census_data/
 │       ├── male_first_names.json            # 3,437 names
 │       ├── female_first_names.json          # 4,018 names
-│       └── surnames.json                    # 162,254 surnames
+│       └── surnames.json                    # 162,252 surnames
 └── handlers/
     ├── __init__.py                # Exports NameHandler
     ├── base_handler.py            # BaseEntityHandler: per-document cache + interface
@@ -637,7 +637,7 @@ git lfs install
 # Pull the actual file
 git lfs pull
 
-# Verify size (should be ~3.8GB)
+# Verify size (should be ~4.2GB)
 ls -lh limina_postprocessor/data/name_dictionary_1b_filtered.parquet
 ```
 
@@ -647,7 +647,7 @@ ls -lh limina_postprocessor/data/name_dictionary_1b_filtered.parquet
 
 **Problem:** Slow download of dictionary file  
 **Solution:**
-- Git LFS can be slow for large files (3.8GB)
+- Git LFS can be slow for large files (4.2GB)
 - Expected time: 5-15 minutes depending on connection
 
 ### Memory Issues

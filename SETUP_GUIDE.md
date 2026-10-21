@@ -18,7 +18,7 @@ The post-processor provides two sample scripts for testing:
 ### Required
 
 - **Python 3.8+**
-- **Git with Git LFS** (for downloading the 3.8GB name dictionary)
+- **Git with Git LFS** (for downloading the 4.2GB name dictionary)
 - **Python packages:** `pyarrow`, `requests`
 
 ### Optional (for `sample_inline_deid_postprocess.py` only)
@@ -49,7 +49,7 @@ git lfs install
 git clone https://github.com/privateai/limina-postprocessor.git limina-postprocessor
 cd limina-postprocessor
 
-# Verify dictionary was downloaded (should be ~3.8GB, not a few KB)
+# Verify dictionary was downloaded (should be ~4.2GB, not a few KB)
 ls -lh limina_postprocessor/data/name_dictionary_1b_filtered.parquet
 
 # If only showing a few KB, pull the actual file:
@@ -293,7 +293,7 @@ The samples above run as-is. A few things to be aware of before scaling to a lar
 git lfs install
 git lfs pull
 ls -lh limina_postprocessor/data/name_dictionary_1b_filtered.parquet
-# Should show ~3.8GB
+# Should show ~4.2GB
 ```
 
 ### DEID Container Connection Error
@@ -327,7 +327,7 @@ pip install --break-system-packages pyarrow requests
 **Solution:**
 - Steady-state usage is ~50MB; the dictionary is memory-mapped, not loaded
 - Ensure the parquet file is on local disk (not a network mount) for best performance
-- The dictionary itself is 3.8GB on disk but sampling uses only ~50MB RAM
+- The dictionary itself is 4.2GB on disk but sampling uses only ~50MB RAM
 
 **Problem:** Memory grows steadily over a long run  
 **Cause:** Expected, not a leak. Every name handed out is retained so it is never
