@@ -25,6 +25,11 @@ The post-processor provides two sample scripts for testing:
 
 - **Limina DEID container** running locally (default: `http://localhost:8080`)
 
+### Optional (for removing blocked names, Step 3)
+
+- **DuckDB** (`pip install duckdb`) — only used by `tools/remove_names.py`, never by the
+  post-processor itself
+
 ---
 
 ## Installation
@@ -64,6 +69,65 @@ pip install pyarrow requests
 # Or on systems with externally-managed Python:
 pip install --break-system-packages pyarrow requests
 ```
+
+### Step 3: Remove Blocked Names from the Dictionary (Optional)
+
+Skip this unless there are names the post-processor must never produce. Run it **before** you start
+processing: it rewrites the dictionary without those names so they cannot be sampled.
+
+```bash
+pip install duckdb
+```
+
+List the blocked names one per line, in `blocked.txt`:
+
+```
+# an exact pairing, removed on its own
+Jennifer Lopez
+
+# a single name, removed everywhere it appears
+Lopez
+```
+
+Two-word entries remove that exact full name. A single word removes the name in **either**
+position, as a first name and as a surname. Case and extra spaces are ignored, and `#`
+lines are comments.
+
+**Preview first** — this reads the dictionary and changes nothing (~15 seconds):
+
+```bash
+python3 tools/remove_names.py blocked.txt
+```
+
+```
+dictionary           : .../name_dictionary_1b_filtered.parquet (1,203,974,287 rows)
+  full_name   matches 1 names, 2 rows (0.000%)
+  first_name  matches 0 names, 0 rows (0.000%)
+  last_name   matches 1 names, 7,208 rows (0.001%)
+would remove         : 7,208 rows (0.001%) in 11.9s
+```
+
+A name matching 0 rows was never in the dictionary — that is not an error. Many
+well-known names are already absent. Use the preview to confirm your list is spelled the
+way the dictionary stores names before rewriting 4GB.
+
+**Then apply it:**
+
+```bash
+python3 tools/remove_names.py blocked.txt --in-place
+```
+
+Before you run it:
+
+- **Takes ~5 minutes** and needs **~4GB of free disk for the new file plus ~60GB of
+  scratch space**. Relocate the scratch with `--temp-dir /path/with/room`.
+- **Interrupted runs are safe.** The rewrite goes to a temporary file and only replaces
+  the dictionary once it is complete and passes a layout check.
+- **Your pipeline needs no change** — the dictionary path is the same as before.
+- **`git lfs pull` restores the original file**, so keep `blocked.txt` in version control
+  and re-run this step after a fresh clone.
+- **To trial it first**, copy the dictionary and clean the copy instead:
+  `python3 tools/remove_names.py blocked.txt --dictionary /tmp/copy.parquet --in-place`.
 
 ---
 
@@ -320,6 +384,25 @@ pip install pyarrow requests
 # Or on Ubuntu 22.04+:
 pip install --break-system-packages pyarrow requests
 ```
+
+### Blocked Name Removal Fails or Fills the Disk
+
+**Problem:** `tools/remove_names.py` fails partway, or the disk fills while it runs  
+**Cause:** The rewrite sorts all 1.2 billion rows back into their original order, which
+spills ~60GB of temporary data. By default that scratch space goes next to the output
+file.  
+**Solution:**
+```bash
+# send the scratch space somewhere with room
+python3 tools/remove_names.py blocked.txt --in-place --temp-dir /path/with/room
+
+# a failed run leaves the dictionary untouched; remove the partial rewrite
+rm -f limina_postprocessor/data/name_dictionary_1b_filtered.cleaning.parquet
+```
+
+**Problem:** `ModuleNotFoundError: No module named 'duckdb'`  
+**Solution:** `pip install duckdb` — it is needed only for this tool, not for the
+post-processor.
 
 ### Memory Issues
 

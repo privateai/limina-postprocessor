@@ -25,3 +25,6 @@ dist/
 # sample output folders (generated when running samples)
 sample_output/
 sample_output_batch/
+
+# DuckDB sort spill, if tools/remove_names.py is interrupted
+.tmp/
