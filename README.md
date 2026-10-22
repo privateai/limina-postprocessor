@@ -7,11 +7,8 @@ Replaces de-identified name placeholders with realistic synthetic names while pr
 - **Within-document coreference** - Same name gets same replacement
 - **Gender matching** - Male/female names matched (~90% on the sample corpus)
 - **Leading honorifics** - Dr., Mr., Mrs., Ms., Prof. preserved
+- **Trailing suffixes** - Jr., Sr., II, III, IV preserved
 - **Index accuracy** - Character positions tracked correctly
-
-> **Known limitation:** trailing suffixes (`Jr.`, `Sr.`, `III`, `IV`) are **dropped**, not
-> preserved — `_split_title` only strips titles from the *front* of a name. See
-> [Honorific Handling](#honorific-handling).
 
 ---
 
@@ -83,7 +80,9 @@ Replaces name entities with synthetic names from a 1.2B name dictionary.
    - `NAME_FAMILY` → Last name only ("Davis")
    - `NAME_MEDICAL_PROFESSIONAL` → Full name (treated identically to `NAME`)
 
-6. **Honorific Handling:** see [Honorific Handling](#honorific-handling)
+6. **Honorific and Suffix Handling:** leading titles and trailing generational suffixes are
+   split off, preserved, and re-attached around the replacement — see
+   [Honorific and Suffix Handling](#honorific-handling)
 
 **Performance** (measured on the 1.2B / 3.8GB dictionary, single process):
 - **Initialization:** ~0.05s (reads parquet metadata only, no data scan)
@@ -103,6 +102,9 @@ Detects gender from names using three-tier fallback strategy.
 - **Note:** with the recommended `entity_detection` payload, DEID leaves honorifics
   *outside* the entity span, so Tier 1 fired 0/402 times on the sample corpus. It
   only matters for upstream configs that include the title in the entity text.
+- **Note:** `Jr./Sr./III/IV` are listed as male titles but matched only as *prefixes*, so a
+  trailing suffix never reaches Tier 1 — the first name decides. See
+  [Honorific and Suffix Handling](#honorific-handling).
 
 **Tier 2 - Census Lookup (<0.01ms):**
 - 6,782 first names from US Census data, loaded into a dict at init
@@ -348,6 +350,31 @@ payload = {
 
 ---
 
+### Sample 3: Threaded Batching on Live DEID Output
+
+Samples 1 and 2 post-process one document at a time, which is the correct shape when
+documents *arrive* one at a time. Sample 3 covers the other shape — many documents in hand at
+once — by handing the container's whole returned array to the thread pool instead of looping
+over it. It is the one to copy for a batch job.
+
+**Script:** `sample_threaded_deid_postprocess.py` (needs the DEID container on the first run
+only; the raw output is cached and reused)
+
+```bash
+python3 sample_threaded_deid_postprocess.py --texts 100 --workers 8
+```
+
+It times both correct patterns against the loop-over-the-array mistake, which is the point:
+`workers=8` is a ceiling, not a promise, so the loop measures ~1× while the batched call
+measures ~5×. It then verifies the threaded output, reports how many documents passed, and
+writes any failures to `failures.json` — exiting non-zero if any fail, so it can gate a
+pipeline step.
+
+Full walkthrough is in [SETUP_GUIDE.md](SETUP_GUIDE.md); the measured numbers, the GIL
+explanation and the trade-offs are under [Parallel Processing](#parallel-processing).
+
+---
+
 ## Technical Details
 
 ### PyArrow Integration
@@ -369,8 +396,8 @@ unit parquet can decode, so sampling works at that granularity:
 # Pick a random row group known to contain the target gender
 row_group = random.choice(self.row_groups[gender])
 
-# Decode only the column we substitute (~3ms, ~2MB)
-table = self.parquet.read_row_group(row_group, columns=[column])
+# Decode only the column we substitute (~3ms, ~2MB), through a reader this thread owns
+table = self._reader().read_row_group(row_group, columns=[column])
 
 # Then probe random rows within it
 check_name = table.column(column)[random.randrange(table.num_rows)].as_py()
@@ -471,22 +498,207 @@ Two further constraints apply beyond the sample-corpus scale this package is ver
 - **Memory.** `used_names_global` costs ~139 bytes per retained name (measured):
   10M names ≈ 1.4GB, 100M ≈ 14GB, **700M ≈ 97GB**. A single process needs a host
   with headroom above that or it will swap.
-- **Parallelism breaks the guarantee.** Each worker process holds its own
-  `used_names_global`, so two workers can independently emit the same name. There is
-  currently no shared or partitioned uniqueness store. `full_name` values *are*
-  globally unique in the parquet (verified over 1.5M sampled rows), so assigning each
-  worker a disjoint subset of row groups would make cross-worker uniqueness hold by
-  construction — this is not implemented.
+- **Multi-process parallelism breaks the guarantee.** Each worker *process* holds its own
+  `used_names_global`, so two processes can independently emit the same name. There is
+  no shared or partitioned uniqueness store across processes. `full_name` values *are*
+  globally unique in the parquet, so assigning each
+  process a disjoint subset of row groups would make cross-process uniqueness hold by
+  construction — this is not implemented. Multi-*thread* parallelism is safe and is
+  implemented; see [Parallel Processing](#parallel-processing).
+
+<a name="parallel-processing"></a>
+### Parallel Processing
+
+`process_documents()` processes several documents at once on a thread pool, returning
+results in input order:
+
+```python
+results = processor.process_documents(documents, workers=8)   # default: min(8, cpu_count)
+```
+
+For large runs use `iter_documents()`, which is the same thing but streaming — it holds at
+most `workers * QUEUE_DEPTH_PER_WORKER` documents at a time, so the input may be a
+generator over more data than fits in memory:
+
+```python
+for result in processor.iter_documents(load_documents(), workers=8):
+    write(result)                       # input and output both stay bounded
+```
+
+`process_documents()` is just `list(iter_documents(...))`, so it holds every document and
+every result at once — fine for a corpus, not for a backfill. Note this bounds the
+*documents* in flight and does nothing for `used_names_global`, which accumulates every
+name ever handed out; see [Scale Limits](#scale-limits).
+
+**Why threading works here, despite the GIL.** Only one thread may run Python at a time,
+so threading normally does nothing for CPU-bound work. This workload is the exception:
+~99% of the per-name cost is `read_row_group`, which runs in PyArrow's C++ decoder and
+releases the GIL while it decodes. Eight threads therefore decode eight row groups
+genuinely simultaneously. Visible in `time`:
+
+```
+workers=1    2.36s user   0.20s sys    84% cpu   3.02s total
+workers=8    3.30s user   0.22s sys   424% cpu   0.83s total
+```
+
+`424% cpu` — 3.3 seconds of compute inside 0.83 seconds of wall clock — is the evidence
+the parallelism is real. Note `user` rises 40%: threading spreads the work, it does not
+reduce it.
+
+**Why threads and not processes.** Threads share one `used_names_global`, so
+cross-document uniqueness still holds. Processes each get their own copy of that set and
+can hand out the same name twice (see [Scale Limits](#scale-limits)).
+
+Measured over 200 documents / 1,000 draws, against the pre-threading code:
+
+| | Time | vs. before |
+|---|---|---|
+| Before threading, serial | 2.73s | 1.00× |
+| After, `workers=1` | 2.78s | 0.98× — slightly slower |
+| After, `workers=8` | 0.57s | **4.79×** |
+
+Gains flatten past 8 workers (16 gave only 12% more): the decode is memory-bandwidth
+bound, not core bound. Note the ~2% cost at `workers=1`, from routing per-document state
+through a thread-local.
+
+**Speedup is capped by document count, not worker count.** The unit of parallelism is the
+document, so a batch holding fewer documents than workers cannot saturate the pool. The
+same total work (1,000 draws) across three batch shapes:
+
+| Batch shape | `workers=1` | `workers=8` | Speedup | Ceiling |
+|---|---|---|---|---|
+| 200 docs × 5 names | 1.50s | 0.19s | **7.80×** | `min(8, 200)` |
+| 8 docs × 125 names | 0.89s | 0.18s | **4.92×** | `min(8, 8)` |
+| 2 docs × 500 names | 0.90s | 0.58s | **1.54×** | `min(8, 2)` = 2× |
+
+So batch *many* documents rather than a few large ones. A single large document cannot be
+split across workers: coreference and gender state are per-document by design.
+
+<a name="batching-worked-example"></a>
+#### Batching: worked example
+
+Hand the pool everything at once and let it pull. Build the processor **once** for the run:
+
+```python
+processor = DEIDPostProcessor(name_dictionary_path=DICT)   # once, not per batch
+
+def load_documents(paths):
+    for path in paths:                 # generator — nothing accumulates
+        with open(path) as f:
+            data = json.load(f)
+        # DEID returns an array per file; yield the documents inside it, since one
+        # document is one unit of work for the pool
+        yield from (data if isinstance(data, list) else [data])
+
+with open('out.jsonl', 'w') as out:
+    for result in processor.iter_documents(load_documents(paths), workers=8):
+        out.write(json.dumps(result) + '\n')
+```
+
+One pool for the whole run, input and output both bounded, all workers saturated. Measured
+against the same 200 documents processed serially (best of 5; this host is noisy under the
+memory-mapped dictionary, so only the large gaps are meaningful):
+
+| Pattern | Best of 5 | vs. serial |
+|---|---|---|
+| Serial baseline (`workers=1`) | 1.16s | 1.00× |
+| **`iter_documents`, one call, `workers=8`** | 0.18s | **6.6×** |
+| `process_documents`, one call, `workers=8` | 0.21s | 5.5× |
+| Chunks of 8, `workers=8` | 0.28s | 4.1× |
+| Chunks of 2, `workers=8` | 0.52s | 2.2× |
+| 200 calls of 1 document, `workers=8` | 0.91s | ~1× — within noise of serial |
+
+**Four ways to lose the speedup:**
+
+1. **Looping outside the call.** `workers=8` is a ceiling, not a promise — one document
+   means one future in a pool of eight, so seven threads idle while you pay pool setup on
+   every iteration:
+
+   ```python
+   for doc in documents:
+       result = processor.process_documents([doc], workers=8)[0]   # ~1×
+   ```
+
+2. **Chunks smaller than `workers`.** Chunks of 2 cap at 2× no matter the core count. If
+   you chunk for checkpointing, make chunks comfortably larger than `workers` and keep one
+   processor across them.
+
+3. **Rebuilding the processor per batch.** This is a *correctness* bug, not a slowdown:
+
+   ```python
+   for chunk in chunks(documents, 500):
+       p = DEIDPostProcessor(name_dictionary_path=DICT)   # ← resets used_names_global
+       p.process_documents(chunk, workers=8)
+   ```
+
+   `used_names_global` lives on the `NameHandler` instance, so a fresh processor starts with
+   an empty set: names repeat across chunks and the cross-document uniqueness guarantee —
+   the whole reason this uses threads rather than processes — silently breaks. It also
+   re-opens the dictionary and re-indexes all 9,659 row groups each time.
+
+4. **Merging documents to reduce overhead.** Backwards: the unit of work *is* the document,
+   so merging removes the parallelism. It also changes output, since coreference state is
+   per-document — merged documents share name mappings, so a name in one leaks into another
+   that is supposed to be independent.
+
+**The rule:** maximize the *number of documents* in flight, not the size of each. Speedup is
+`min(workers, documents_in_the_call)`, so anything shrinking the second term is what costs
+you, regardless of how much total text is going through.
+
+#### When to use it
+
+Offline batch work over **many** documents — corpus runs, backfills — on one host with RAM
+headroom, at ~8 workers. That is the 5–8× regime and the case this is built for.
+
+**When it does not help:**
+
+- **One document per call** (e.g. a single REST request). Parallelism is *across*
+  documents, never within one — a single document's names are still drawn sequentially.
+  Expect the ~2% `workers=1` penalty and no gain.
+- **A few large documents.** See the table above: two documents cap at 2× regardless of
+  core count.
+- **`process_file()` and the CLI**, which still loop serially. Only explicit
+  `process_documents()` / `iter_documents()` calls are threaded.
+- **When output must be reproducible.** Threads interleave draws from the shared random
+  stream, so a document gets different names (still unique, still gender-matched)
+  depending on the worker count. Use `workers=1` for byte-identical reruns.
+- **Scaling past one process.** Threads are the limit of what is safe here; processes break
+  the uniqueness guarantee (see [Scale Limits](#scale-limits)).
+
+**Trade-offs to accept:**
+
+- **It reaches the memory ceiling sooner.** Threading does not change what
+  `used_names_global` costs (~139 bytes/name); it consumes names 5–8× faster in wall-clock,
+  so whatever the RAM ceiling is, the run arrives there sooner. The streaming window in
+  `iter_documents()` bounds documents in flight and does nothing for this.
+- **A mid-run failure is not transactional.** When a document raises, `.result()` re-raises
+  in yield order and the pool shuts down — but documents already submitted still finish,
+  and every name they drew stays in `used_names_global`. The result is partial output plus
+  permanently consumed names, with no rollback.
+- **Each thread needs its own `ParquetFile`.** This used to be one shared reader, justified
+  by concurrent reads on PyArrow 21.0.0 returning data byte-identical to serial reference
+  reads — an observed property, not a contract, with a note to re-check on upgrade. It broke
+  on exactly that upgrade: PyArrow 25 turned `pre_buffer` on by default (off through 21), and
+  the `ReadRangeCache` behind it is mutated by every `read_row_group` call, so concurrent
+  workers invalidate each other's entry and raise `ReadRangeCache did not find matching cache
+  entry`. `_reader()` now hands each thread its own reader and `pre_buffer` is pinned off, so
+  neither the sharing nor the default matters. **Do not reintroduce a shared reader**, and do
+  not reach for a lock instead — it would have to span the decode, which is the only part that
+  runs in parallel.
 
 <a name="honorific-handling"></a>
-### Honorific Handling
+### Honorific and Suffix Handling
 
-`_split_title` splits a leading honorific off the name, replaces the remainder, then
-re-attaches the honorific:
+A name is split into three parts — leading title, core name, trailing suffix — and only the
+core is replaced. `_split_title` strips the front, `_split_suffix` strips the back, and both
+are re-attached afterwards:
 
 ```
-"Dr. Sarah Johnson"  →  ("Dr.", "Sarah Johnson")  →  "Dr. Cathleen Sciaraffa"
+"Dr. Sarah Johnson"       →  ("Dr.", "Sarah Johnson", None)   →  "Dr. Cathleen Sciaraffa"
+"Dr. John Smith Jr."      →  ("Dr.", "John Smith", " Jr.")    →  "Dr. Kamron Kroman Jr."
 ```
+
+#### Leading titles (`_split_title`)
 
 Two rules make this safe:
 
@@ -500,19 +712,47 @@ Two rules make this safe:
 Recognised: `Dr.` `Dr` `Mr.` `Mr` `Mrs.` `Mrs` `Ms.` `Ms` `Miss` `Mss.` `Mss` `Prof.`
 `Prof` `Jr.` `Jr` `Sr.` `Sr` `III` `IV`
 
-⚠️ **Trailing suffixes are dropped.** `_split_title` only inspects the front of the
-string, so `Jr.`, `Sr.`, `III` and `IV` — which in real text appear *after* the name —
-are silently lost:
+#### Trailing suffixes (`_split_suffix`)
+
+DEID puts a generational suffix *inside* the name entity (`"James Wilson Sr"`), so a
+replacement drawn from the dictionary has no suffix of its own and the text loses a token it
+started with. `_split_suffix` is the mirror of `_split_title` and fixes that:
+
+```python
+NAME_SUFFIXES = frozenset({'JR', 'SR', 'II', 'III', 'IV'})
+```
 
 ```
-"John Smith Jr."      →  "Hunter Molthan"        (Jr. dropped)
-"Robert Downey III"    →  (III dropped)
-"Dr. John Smith Jr."  →  "Dr. Hunter Molthan"    (Dr. kept, Jr. dropped)
+"John Smith Jr."      →  "Darvin Hoeper Jr."
+"Robert Downey III"   →  "Jordy Kickbush III"
+"Wilson, Jr."         →  "Christion Almonaci, Jr."    ← comma style preserved
+"Dr. John Smith Jr."  →  "Dr. Kamron Kroman Jr."      ← both ends preserved
 ```
 
-`gender_detector` also classifies `Jr./Sr./III/IV` as male *prefix* titles, which is the
-same wrong shape. Accepted for now; fixing it means matching suffixes at the end of the
-string in both modules.
+Four rules make this safe:
+
+1. **Matched as a whole trailing token**, compared case-insensitively and ignoring a trailing
+   period. Surnames that merely *end* in those letters are untouched — `"Sriram"`,
+   `"Junior Alvarez"` keep their full text.
+2. **Stripped before the cache key is built.** `"James Wilson Sr"` and `"James Wilson"` are
+   therefore one person, the way `"Dr. James Wilson"` already was. This also fixes a
+   coreference bug: `"Sr"` used to be cached as the surname component by `_cache_components`,
+   so a later bare `"Wilson"` resolved against the wrong token.
+3. **The separator travels with the suffix**, so `"Wilson, Jr."` does not come back as
+   `"Wilson Jr."`.
+4. **A bare suffix is left alone.** `_split_suffix("Jr")` returns `("Jr", None)` — stripping it
+   would leave nothing to replace.
+
+Bare `V` and `I` are deliberately **not** in `NAME_SUFFIXES`: as a trailing token they are far
+more often a middle initial than a generational marker, and stripping an initial would change
+the name rather than preserve it. So `"Mary Wilson V"` is replaced whole.
+
+⚠️ `gender_detector` still classifies `Jr./Sr./III/IV` as male **prefix** titles, which is the
+wrong shape — but it has no effect in practice, because `_detect_from_title` only matches at
+the front of the string. A trailing suffix never produced a Tier 1 hit, so stripping it before
+gender detection loses no signal that was being used. Verified: `detect_gender` returns `male`
+for `"James Wilson Sr"` and `female` for `"Mary Wilson Sr"`, in both cases from the census
+lookup on the first name, not from the suffix.
 
 ### Index Tracking
 
@@ -568,11 +808,16 @@ limina_postprocessor/
     └── gender_detector.py         # 3-tier gender detection
 
 # Sample scripts
-sample_batch_process_files.py      # Batch folder processing (sample_input/ → sample_output/)
-sample_inline_deid_postprocess.py  # Full DEID pipeline + verification on 100 texts
+sample_batch_process_files.py        # Batch folder processing (sample_input/ → sample_output/)
+sample_inline_deid_postprocess.py    # Full DEID pipeline + verification on 100 texts
+sample_threaded_deid_postprocess.py  # Threaded batching on live DEID output
 
-SETUP_GUIDE.md                     # Environment setup
+SETUP_GUIDE.md                       # Environment setup, all three samples
 ```
+
+The two serial samples and the threaded one are different pipeline shapes, not old and new —
+see [When to use it](#when-to-use-it). Walkthroughs for all three are in
+[SETUP_GUIDE.md](SETUP_GUIDE.md).
 
 `NameHandler` is the only handler. Facility and address handlers were removed, as
 were the dictionary-generation scripts — the parquet ships with the repo via Git LFS.
@@ -701,7 +946,7 @@ work. Budget ~14GB per 100M entities. See [Scale Limits](#scale-limits).
   help these. They also matter least — the replacement is a surname either way.
   See [If Gender Cannot Be Determined](#if-gender-cannot-be-determined)
 
-### Mangled or Fabricated Titles
+### Mangled Titles or Missing Suffixes
 
 **Problem:** A replacement comes out as `"Dr Evelin Ramseur"` from an input with no title  
 **Cause:** A regression in `_split_title`'s boundary check — a name beginning with a
@@ -712,9 +957,19 @@ is that a title only matches when whitespace follows it. Verify with:
 handler._split_title("Drew Lee")   # must be (None, 'Drew Lee')
 ```
 
-**Problem:** `Jr.` / `Sr.` / `III` / `IV` missing from output  
-**Cause:** Known limitation, not a bug — trailing suffixes are dropped. See
-[Honorific Handling](#honorific-handling).
+**Problem:** `Jr.` / `Sr.` / `II` / `III` / `IV` missing from output  
+**Cause:** A regression in `_split_suffix`. These are preserved as of the suffix-handling
+change; before it they were silently dropped. Verify with:
+
+```python
+handler._split_suffix("John Smith Jr.")   # must be ('John Smith', ' Jr.')
+handler._split_suffix("Sriram")           # must be ('Sriram', None)
+```
+
+**Problem:** A trailing initial is being treated as a suffix, or `V` / `I` is dropped  
+**Cause:** Something was added to `NAME_SUFFIXES`. Bare `V` and `I` are excluded on purpose —
+as a trailing token they are usually a middle initial. See
+[Honorific and Suffix Handling](#honorific-handling).
 
 ### Index Misalignment
 

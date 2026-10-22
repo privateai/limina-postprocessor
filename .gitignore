@@ -25,3 +25,4 @@ dist/
 # sample output folders (generated when running samples)
 sample_output/
 sample_output_batch/
+sample_output_threaded_deid/
