@@ -17,7 +17,7 @@ Replaces de-identified name placeholders with realistic synthetic names while pr
 
 ## Overview
 
-This package processes de-identified text from Limina DEID by replacing name entity placeholders with synthetic names from a **1.2 billion name dictionary**.
+This package processes de-identified text from Limina DEID by replacing name entity placeholders with synthetic names from a **1.95 billion name dictionary**.
 
 **What it does:**
 ```
@@ -26,7 +26,7 @@ Output: "Patient Andrew Davis visited Dr. Jessica Thompson..."
 ```
 
 **Key Features:**
-- **1.2B name dictionary** - US Census data + filtered famous names
+- **1.95B name dictionary** - US Census + Ontario first names, filtered famous names
 - **Global uniqueness tracking** - Zero cross-document reuse per entity type
 - **Pure PyArrow** - Memory-mapped row group reads (~50MB RAM, no DuckDB)
 - **3-tier gender detection** - Titles → census → API fallback (off by default)
@@ -41,13 +41,13 @@ The post-processor uses a handler-based architecture focused on name entity repl
 
 ### 1. **Name Handler** (`limina_postprocessor/handlers/name_handler.py`)
 
-Replaces name entities with synthetic names from a 1.2B name dictionary.
+Replaces name entities with synthetic names from a 1.95B name dictionary.
 
 **Core Features:**
 
 1. **Global Uniqueness Tracking:**
    - `used_names_global` set tracks every value handed out, across all documents
-   - Random row group sampling from the 1.2B dictionary
+   - Random row group sampling from the 1.95B dictionary
    - Up to 100 probes per name (`PROBES_PER_ROW_GROUP` 25 × `MAX_ROW_GROUP_READS` 4)
    - **Result:** No cross-document reuse, until the relevant pool is exhausted
      (see [Pool Ceilings](#pool-ceilings))
@@ -69,7 +69,7 @@ Replaces name entities with synthetic names from a 1.2B name dictionary.
 
 4. **Gender Detection (3-tier system):**
    - **Tier 1 - Title matching:** Mr., Mrs., Ms. (instant)
-   - **Tier 2 - Census lookup:** 6,782 US first names
+   - **Tier 2 - Census lookup:** 12,018 first names (US Census + Ontario)
    - **Tier 3 - API fallback:** Optional Genderize.io (disabled by default)
    - **Measured:** 90.7% agreement on the 100-doc sample corpus (175/193 entities
      where gender was resolvable on both sides)
@@ -85,9 +85,11 @@ Replaces name entities with synthetic names from a 1.2B name dictionary.
 
 6. **Honorific Handling:** see [Honorific Handling](#honorific-handling)
 
-**Performance** (measured on the 1.2B / 4.2GB dictionary, single process):
+**Performance** (measured on the 1.95B / 1.5GB dictionary, single process). Warm
+medians over 3 runs of 300 names; a cold first read of `NAME` is ~3ms, so benchmark
+after a warm-up or the page cache dominates the result:
 - **Initialization:** ~0.05s (reads parquet metadata only, no data scan)
-- **Per generated name:** `NAME` 2.78ms · `NAME_FAMILY` 1.50ms · `NAME_GIVEN` 0.92ms
+- **Per generated name:** `NAME` 1.1–1.3ms · `NAME_FAMILY` 1.1–1.2ms · `NAME_GIVEN` 0.8ms
 - **Per document:** ~7.9ms on the sample corpus (~4 name entities each)
 - **Memory:** ~50MB steady state for sampling — but `used_names_global` grows
   ~139 bytes per name retained (see [Scale Limits](#scale-limits))
@@ -105,7 +107,7 @@ Detects gender from names using three-tier fallback strategy.
   only matters for upstream configs that include the title in the entity text.
 
 **Tier 2 - Census Lookup (<0.01ms):**
-- 6,782 first names from US Census data, loaded into a dict at init
+- 12,018 first names from US Census + Ontario data, loaded into a dict at init
 - One winning gender per name, not a probability: the male/female counts are
   compared once in `_load_census_data` and only the winner is stored (ties → male)
 - Measured coverage on the sample corpus: 57/58 distinct original first names
@@ -166,9 +168,79 @@ python3 --version
 pip install pyarrow requests
 ```
 
-### Download the 1.2B Name Dictionary
+### How the Dictionary Is Built
 
-The dictionary is pre-generated and stored in the repository using Git LFS (Large File Storage) due to its size (4.2GB).
+| | |
+|---|---|
+| Rows | 1,945,302,697 |
+| File size | 1.48 GB, 15,476 row groups |
+| Schema | `first_name`, `last_name`, `gender` — all strings |
+| First names | 12,018 (5,591 male / 6,427 female) |
+| Last names | 162,251 |
+| Distinct full names | 1,945,302,697 — **0 duplicates** |
+| Famous names removed | 4,629,821 rows |
+
+Every first name is crossed with every surname: 12,018 × 162,251 = 1,949,932,518 pairs,
+of which 4,629,821 are dropped by the famous-name blocklist, leaving 1,945,302,697.
+
+**There is no `full_name` column.** A full name is assembled as
+`first_name + " " + last_name` at read time. Stored, it was 80% of the file (3.158 of
+3.92 bytes/row) and the dictionary was 7.63 GB — past GitHub's 4 GB Git LFS per-file
+limit, which rejects the push outright. Dropping it also made full-name lookups ~2.3x
+faster, and left `NAME_GIVEN` / `NAME_FAMILY` unchanged — they read a single component
+column, which this did not touch. Query the parquet directly with
+`first_name || ' ' || last_name`.
+
+That it got *faster* is worth explaining, since reading two columns materializes twice
+as many strings. Measured on one file holding all four columns, so only the column
+choice differs — warm, interleaved, 120 samples:
+
+| operation | median |
+|---|---|
+| decode `full_name` alone | 2.39 ms |
+| decode `first_name` + `last_name` | 1.03 ms |
+| components + 25 probe joins | 1.04 ms |
+
+Decode time tracks bytes decompressed, not strings produced. `full_name` is PLAIN
+encoded raw text at 3.162 bytes/row, while the two components are PLAIN_DICTIONARY at
+0.706 bytes/row combined — 4.5x less data to inflate. The joins are rounding error
+(0.005 ms for 25) because `_generate_name` assembles only the rows it probes, never the
+whole row group.
+
+- **First names** come from `data/census_data/{male,female}_first_names.json` — the US
+  Census lists plus Ontario birth registrations (1917–2024, OGL-ON 1.0) merged in by
+  `tools/merge_ontario_first_names.py`. Ontario counts are rescaled onto the Census
+  percentage scale, and a name is only added if the Census carries it in neither file,
+  so no existing gender decision changes. These are the same files
+  `gender_detector` reads, so every name the dictionary can emit is one the detector can
+  resolve.
+- **Last names** come from `data/census_data/surnames.json` (US Census).
+- **Famous names** are removed with `data/famous_names_blocklist.txt` (11,661,376
+  entries) as a case-insensitive anti-join on the assembled full name. Verified by
+  re-running the
+  join against the finished file: zero blocked names remain.
+- **Full names are unique by construction.** Each first name is assigned exactly one
+  gender, so a unisex name cannot pair with the same surname twice. Confirmed by
+  exhaustive `count(DISTINCT first_name || ' ' || last_name)`, not sampling.
+
+Rebuild it with:
+
+```bash
+python3 tools/merge_ontario_first_names.py          # refresh the first-name JSONs
+python3 tools/build_name_dictionary.py \
+  --out limina_postprocessor/data/name_dictionary_1b_filtered.parquet \
+  --target-rows 1949932518 \
+  --blocklist limina_postprocessor/data/famous_names_blocklist.txt --verify
+```
+
+Roughly 5 minutes: ~4 min to lay out rows in the order the row-group layout needs, then
+~48 s for the DuckDB re-encode and blocklist join. Needs `numpy` and `duckdb` in
+addition to the runtime dependencies. `--verify` asserts the layout properties
+`NameHandler` relies on.
+
+### Download the 1.95B Name Dictionary
+
+The dictionary is pre-generated and stored in the repository using Git LFS (Large File Storage) due to its size (1.5GB).
 
 **Option 1: Clone repo with Git LFS (Recommended)**
 ```bash
@@ -188,7 +260,7 @@ cd limina-postprocessor
 
 # Verify dictionary was downloaded
 ls -lh limina_postprocessor/data/name_dictionary_1b_filtered.parquet
-# Should show ~4.2GB
+# Should show ~1.5GB
 ```
 
 **Option 2: Pull LFS files in existing repo**
@@ -353,7 +425,7 @@ payload = {
 ### PyArrow Integration
 
 **Why pure PyArrow?**
-- Memory-maps the 4.2GB parquet file; row groups are decoded only when sampled
+- Memory-maps the 1.5GB parquet file; row groups are decoded only when sampled
 - Memory usage: ~50MB (vs 192GB if loaded in-memory)
 - One dependency instead of two — no SQL engine needed for a single-table lookup
 - **~214× faster than previous design.** `LIMIT 1 OFFSET n` combined
@@ -362,7 +434,7 @@ payload = {
 
 **Sampling Strategy (Random Row Group):**
 
-The dictionary has 9,525 row groups of ~124K rows each. A row group is the smallest
+The dictionary has 15,476 row groups of ~124K rows each. A row group is the smallest
 unit parquet can decode, so sampling works at that granularity:
 
 ```python
@@ -388,8 +460,8 @@ This replaces the old `GROUP BY gender` full scan, cutting init from ~0.56s to ~
 **Why random row groups?**
 - Each draw lands in a different row group, so first names stay varied
   (200 consecutive draws yielded 199 distinct first names and 200 distinct full names)
-- Only the substituted column is decoded, since `full_name` is stored as
-  `"first_name last_name"` — a full name needs just that one column
+- Only the columns actually substituted are decoded — one for `NAME_GIVEN` /
+  `NAME_FAMILY`, two for a full name, which is assembled rather than stored
 - Retries are nearly free: 25 probes reuse the decoded row group before another read
 - Combined with global uniqueness tracking for zero cross-document reuse
 
@@ -409,12 +481,14 @@ actually substituted into the text:
 
 ```python
 # _generate_name, simplified — see name_handler.py for the real probe loop
-column = self.COLUMN_BY_TYPE.get(entity_type, 'full_name')
+columns = self.COLUMNS_BY_TYPE.get(entity_type, ('first_name', 'last_name'))
 
 for _ in range(self.MAX_ROW_GROUP_READS):          # 4 row group decodes
-    candidates = self._sample_row_group(target_gender, column)
+    candidates = self._sample_row_group(target_gender, columns)
     for _ in range(self.PROBES_PER_ROW_GROUP):     # 25 probes per decode
-        check_name = candidates[random.randrange(len(candidates))].as_py()
+        row = random.randrange(len(candidates[0]))
+        # joined at the probed row, so a full name costs one extra lookup
+        check_name = ' '.join(column[row].as_py() for column in candidates)
         if check_name not in self.used_names_global:
             self.used_names_global.add(check_name)
             return self._match_capitalization(original_text, check_name)
@@ -447,9 +521,9 @@ very different sizes:
 
 | Entity Type | Distinct values available | Safe at 700M? |
 |---|---|---|
-| `NAME` / `NAME_MEDICAL_PROFESSIONAL` | ~1.2B | Yes |
+| `NAME` / `NAME_MEDICAL_PROFESSIONAL` | ~1.95B | Yes |
 | `NAME_FAMILY` | ~162K | **No** |
-| `NAME_GIVEN` | ~7,500 (3,437 male / 4,018 female) | **No** |
+| `NAME_GIVEN` | 12,018 (5,591 male / 6,427 female) | **No** |
 
 ⚠️ **When a pool is exhausted, uniqueness fails silently.** All 100 probes miss, and
 the function returns `fallback` — a value that is already in `used_names_global` — and
@@ -473,8 +547,8 @@ Two further constraints apply beyond the sample-corpus scale this package is ver
   with headroom above that or it will swap.
 - **Parallelism breaks the guarantee.** Each worker process holds its own
   `used_names_global`, so two workers can independently emit the same name. There is
-  currently no shared or partitioned uniqueness store. `full_name` values *are*
-  globally unique in the parquet (1,197,156,537 rows, 1,197,156,537 distinct — a full
+  currently no shared or partitioned uniqueness store. Full names *are*
+  globally unique in the parquet (1,945,302,697 rows, 1,945,302,697 distinct — a full
   scan, not a sample), so assigning each worker a disjoint subset of row groups would
   make cross-worker uniqueness hold by construction — this is not implemented.
 
@@ -556,7 +630,7 @@ limina_postprocessor/
 ├── processor.py                   # DEIDPostProcessor: entity positions, index
 │                                  #   offsets, handler dispatch
 ├── data/
-│   ├── name_dictionary_1b_filtered.parquet  # 1.2B names, 4.2GB, 9,525 row groups
+│   ├── name_dictionary_1b_filtered.parquet  # 1.95B names, 1.5GB, 15,476 row groups
 │   └── census_data/
 │       ├── male_first_names.json            # 3,437 names
 │       ├── female_first_names.json          # 4,018 names
@@ -637,7 +711,7 @@ git lfs install
 # Pull the actual file
 git lfs pull
 
-# Verify size (should be ~4.2GB)
+# Verify size (should be ~1.5GB)
 ls -lh limina_postprocessor/data/name_dictionary_1b_filtered.parquet
 ```
 
@@ -647,7 +721,7 @@ ls -lh limina_postprocessor/data/name_dictionary_1b_filtered.parquet
 
 **Problem:** Slow download of dictionary file  
 **Solution:**
-- Git LFS can be slow for large files (4.2GB)
+- Git LFS can be slow for large files (1.5GB)
 - Expected time: 5-15 minutes depending on connection
 
 ### Memory Issues
@@ -669,7 +743,7 @@ work. Budget ~14GB per 100M entities. See [Scale Limits](#scale-limits).
 
 **Problem:** The same replacement shows up in two documents  
 **Causes, in order of likelihood:**
-- **Pool exhausted.** `NAME_GIVEN` runs out at ~7,500 values and `NAME_FAMILY` at
+- **Pool exhausted.** `NAME_GIVEN` runs out at 12,018 values and `NAME_FAMILY` at
   ~162K, after which `_generate_name` returns an already-used name with no warning.
   Check `len(handler.used_names_global)` against the ceilings in
   [Pool Ceilings](#pool-ceilings).
@@ -694,7 +768,7 @@ work. Budget ~14GB per 100M entities. See [Scale Limits](#scale-limits).
 - Enable API fallback: `enable_api_gender=True`
 - Check census data exists: `limina_postprocessor/data/census_data/`
 - Note: API is slow (100-500ms per call) and rate-limited (1000/day free)
-- The census list is US-centric (6,782 names); international first names often miss
+- The name list is US-centric with Ontario additions (12,018 names); international first names often miss
   all three tiers, and unresolved gender falls back to a coin flip
 - **Expected, not a bug:** ~36% of `NAME_FAMILY` entities are ungenderable because a
   bare surname ("Flores") has no first name to look up. Enabling the API will not

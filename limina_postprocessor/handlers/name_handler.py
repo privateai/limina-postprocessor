@@ -14,13 +14,16 @@ from .gender_detector import GenderDetector
 class NameHandler(BaseEntityHandler):
     """Handler for name entity replacement, sampling parquet row groups directly."""
 
-    # Column holding the value substituted for each entity type. full_name is stored
-    # as "first_name last_name", so a full name needs only that one column decoded.
-    COLUMN_BY_TYPE = {
-        'NAME': 'full_name',
-        'NAME_MEDICAL_PROFESSIONAL': 'full_name',
-        'NAME_GIVEN': 'first_name',
-        'NAME_FAMILY': 'last_name',
+    # Columns that make up the value substituted for each entity type, joined with a
+    # space. A full name is assembled from its two components rather than stored: a
+    # materialized full_name column was 80% of the dictionary on disk (3.158 of 3.92
+    # bytes/row) and, being ~13 bytes of text per row instead of a dictionary index,
+    # also cost more to decode than reading both components does.
+    COLUMNS_BY_TYPE = {
+        'NAME': ('first_name', 'last_name'),
+        'NAME_MEDICAL_PROFESSIONAL': ('first_name', 'last_name'),
+        'NAME_GIVEN': ('first_name',),
+        'NAME_FAMILY': ('last_name',),
     }
 
     # Sampling budget: 100 probes total (as before), but at most 4 row group reads
@@ -200,19 +203,22 @@ class NameHandler(BaseEntityHandler):
         else:
             target_gender = 'male' if random.random() < 0.5 else 'female'
 
-        # Only the component we actually use needs to be decoded
-        column = self.COLUMN_BY_TYPE.get(entity_type, 'full_name')
+        # Only the components we actually use need to be decoded
+        columns = self.COLUMNS_BY_TYPE.get(entity_type, ('first_name', 'last_name'))
 
         # Keep trying until we find an unused name
         fallback = None
         for _ in range(self.MAX_ROW_GROUP_READS):
-            candidates = self._sample_row_group(target_gender, column)
-            if len(candidates) == 0:
+            candidates = self._sample_row_group(target_gender, columns)
+            if len(candidates[0]) == 0:
                 continue
 
             # Probe within the decoded row group before paying for another read
-            for _ in range(min(self.PROBES_PER_ROW_GROUP, len(candidates))):
-                check_name = candidates[random.randrange(len(candidates))].as_py()
+            for _ in range(min(self.PROBES_PER_ROW_GROUP, len(candidates[0]))):
+                # Join at the probed row, not across the whole row group: at most 25
+                # rows are ever inspected out of ~124K.
+                row = random.randrange(len(candidates[0]))
+                check_name = ' '.join(column[row].as_py() for column in candidates)
 
                 # If not used globally, mark it and use it
                 if check_name not in self.used_names_global:
@@ -230,8 +236,8 @@ class NameHandler(BaseEntityHandler):
 
         return self._match_capitalization(original_text, fallback)
 
-    def _sample_row_group(self, gender: str, column: str):
-        """Decode one random row group, returning its values of `column` for `gender`.
+    def _sample_row_group(self, gender: str, columns: tuple):
+        """Decode one random row group, returning one array per column, for `gender`.
 
         Row groups that statistics could not resolve to a single gender are filtered
         after reading. Each such read also teaches us what the row group really holds,
@@ -244,10 +250,12 @@ class NameHandler(BaseEntityHandler):
             row_group = random.choice(self.row_groups[gender])
 
             if row_group not in self.mixed_row_groups:
-                table = self.parquet.read_row_group(row_group, columns=[column])
-                return table.column(column)
+                table = self.parquet.read_row_group(row_group, columns=list(columns))
+                return tuple(table.column(name) for name in columns)
 
-            table = self.parquet.read_row_group(row_group, columns=[column, 'gender'])
+            table = self.parquet.read_row_group(
+                row_group, columns=list(columns) + ['gender']
+            )
             total_rows = table.num_rows
             table = table.filter(pc.equal(table.column('gender'), gender))
 
@@ -261,7 +269,7 @@ class NameHandler(BaseEntityHandler):
                 self.mixed_row_groups.discard(row_group)
                 self._drop_row_group(row_group, other)
 
-            return table.column(column)
+            return tuple(table.column(name) for name in columns)
 
         raise RuntimeError(
             f"No {gender} names available in {self.dictionary_path}"

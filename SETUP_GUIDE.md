@@ -18,7 +18,7 @@ The post-processor provides two sample scripts for testing:
 ### Required
 
 - **Python 3.8+**
-- **Git with Git LFS** (for downloading the 4.2GB name dictionary)
+- **Git with Git LFS** (for downloading the 1.5GB name dictionary)
 - **Python packages:** `pyarrow`, `requests`
 
 ### Optional (for `sample_inline_deid_postprocess.py` only)
@@ -49,16 +49,28 @@ git lfs install
 git clone https://github.com/privateai/limina-postprocessor.git limina-postprocessor
 cd limina-postprocessor
 
-# Verify dictionary was downloaded (should be ~4.2GB, not a few KB)
+# Verify dictionary was downloaded (should be ~1.5GB, not a few KB)
 ls -lh limina_postprocessor/data/name_dictionary_1b_filtered.parquet
 
 # If only showing a few KB, pull the actual file:
 git lfs pull
 ```
 
+The dictionary holds **1,945,302,697** synthetic full names: 12,018 first names
+(US Census plus Ontario birth registrations) crossed with 162,251 US Census surnames,
+minus 4,629,821 pairs removed by the famous-name blocklist. Every full name is
+distinct — there are no duplicate rows. See
+[How the Dictionary Is Built](README.md#how-the-dictionary-is-built) for provenance and
+rebuild steps.
+
 ### Step 2: Install Python Dependencies
 
 ```bash
+# pip 21.3+ is required for the editable install in "Integration" below. The pip
+# bundled with Python 3.9's venv is older and fails with "editable mode currently
+# requires a setuptools-based build".
+pip install --upgrade pip setuptools wheel
+
 pip install pyarrow requests
 
 # Or on systems with externally-managed Python:
@@ -175,6 +187,10 @@ pip install -e .
 pip install --break-system-packages -e .
 ```
 
+Needs **pip 21.3 or newer**. On older pip this fails with `A "pyproject.toml" file was
+found, but editable mode currently requires a setuptools-based build`; run
+`pip install --upgrade pip setuptools wheel` first.
+
 **Verify installation:**
 
 ```bash
@@ -277,8 +293,8 @@ The samples above run as-is. A few things to be aware of before scaling to a lar
   change inside the package — talk to us first.
 - **Memory grows with the run**, since every name issued is retained to guarantee it
   is never reused: roughly 1.4GB per 10M replacements (~100GB at 700M).
-- **`NAME_GIVEN` and `NAME_FAMILY` have much smaller pools** than the headline 1.2
-  billion (~7,500 first names and ~162,000 surnames). If a pool runs out, duplicates
+- **`NAME_GIVEN` and `NAME_FAMILY` have much smaller pools** than the headline 1.95
+  billion (12,018 first names and 162,251 surnames). If a pool runs out, duplicates
   appear with no error, so let us know your expected volume per entity type.
 
 ---
@@ -293,7 +309,7 @@ The samples above run as-is. A few things to be aware of before scaling to a lar
 git lfs install
 git lfs pull
 ls -lh limina_postprocessor/data/name_dictionary_1b_filtered.parquet
-# Should show ~4.2GB
+# Should show ~1.5GB
 ```
 
 ### DEID Container Connection Error
@@ -327,7 +343,7 @@ pip install --break-system-packages pyarrow requests
 **Solution:**
 - Steady-state usage is ~50MB; the dictionary is memory-mapped, not loaded
 - Ensure the parquet file is on local disk (not a network mount) for best performance
-- The dictionary itself is 4.2GB on disk but sampling uses only ~50MB RAM
+- The dictionary itself is 1.5GB on disk but sampling uses only ~50MB RAM
 
 **Problem:** Memory grows steadily over a long run  
 **Cause:** Expected, not a leak. Every name handed out is retained so it is never
