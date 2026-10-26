@@ -278,6 +278,86 @@ git lfs pull
 ls -lh limina_postprocessor/data/name_dictionary_1b_filtered.parquet
 ```
 
+### Remove Blocked Names from the Dictionary (optional)
+
+If there are names the post-processor must never emit, you can clean them
+out of the dictionary once before you start processing. The post-processor then cannot produce them because they are no longer in the file it samples from.
+
+This step needs DuckDB, which the pipeline itself does not use:
+
+```bash
+pip install duckdb
+```
+
+Put the blocked names in a text file, one per line (`blocked.txt`):
+
+```
+# an exact pairing, removed on its own
+Jennifer Lopez
+Steve Martin
+
+# a single name, removed everywhere it appears
+Martin
+```
+
+Two-word entries remove that exact full name. A single word removes the name in **either**
+position, as a first name and as a surname - so `Martin` removes `Martin Smith`
+and `Maria Martin` . Matching ignores case and extra spaces. Lines starting
+with `#` are comments.
+
+Check what a list would remove before committing to it:
+
+```bash
+python3 tools/remove_names.py blocked.txt
+```
+
+```
+removal list         : 3 names from blocked.txt
+             2 distinct -> full_name
+             1 distinct -> first_name, last_name
+dictionary           : limina_postprocessor/data/name_dictionary_1b_filtered.parquet (1,203,974,287 rows)
+  full_name   matches 2 names, 3 rows (0.000%)
+  first_name  matches 0 names, 0 rows (0.000%)
+  last_name   matches 1 names, 7,208 rows (0.001%)
+would remove         : 7,208 rows (0.001%) in 10.6s
+```
+
+A name that matches 0 rows was simply never in the dictionary — many well-known names
+are already absent from the filtered file so a zero is not an error. Use this to
+confirm a list is spelled the way the dictionary stores it before you rewrite 4GB.
+
+Running it with no other arguments only previews. To apply it, add `--in-place`:
+
+```bash
+python3 tools/remove_names.py blocked.txt --in-place
+```
+
+Takes about 5 minutes for the full 1.2B-row dictionary. **Free disk needed: ~4GB for the
+new file plus ~60GB of scratch space**, because the rows are sorted back into their
+original order as they are written (that ordering is what keeps the dictionary fast to
+sample from). The scratch space goes next to the output file by default; send it
+somewhere with more room with `--temp-dir`:
+
+```bash
+python3 tools/remove_names.py blocked.txt --in-place --temp-dir /path/with/room
+```
+
+The rewrite goes to a temporary file and only replaces the dictionary once it is complete
+and passes a layout check so an interrupted or failed run leaves your dictionary
+untouched. Run your pipeline exactly as before afterwards - the path has not changed.
+
+Notes:
+
+- **Re-cleaning is cheap to repeat.** Running it again with a longer list is safe; names
+  already removed simply match nothing.
+- **A `git lfs pull` restores the original file.** Keep `blocked.txt` in version control
+  so the cleaning step can be replayed after any fresh clone.
+- **The file can grow slightly** (4.04GB → 4.13GB in testing) even though it holds fewer
+  rows, because removing rows makes the remaining data compress less well.
+- **To trial it without touching the shipped file**, copy the dictionary and clean the
+  copy: `cp limina_postprocessor/data/name_dictionary_1b_filtered.parquet /tmp/copy.parquet`
+  then `python3 tools/remove_names.py blocked.txt --dictionary /tmp/copy.parquet --in-place`.
+
 ---
 
 ## Usage Examples
