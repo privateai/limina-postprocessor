@@ -6,28 +6,23 @@ from typing import Dict, Optional
 
 
 class BaseEntityHandler(ABC):
-    """Abstract base class for entity replacement handlers."""
+    """Interface for entity replacement handlers, plus a per-document cache.
+
+    The cache exists so that one original value maps to one replacement throughout a
+    document. The processor calls `clear_cache` before each document.
+    """
 
     def __init__(self):
-        """Initialize the handler."""
         self.cache = {}
 
     @abstractmethod
     def can_handle(self, entity_type: str) -> bool:
-        """Check if this handler can process the given entity type."""
-        pass
+        """Whether this handler replaces the given entity type."""
 
     @abstractmethod
     def get_replacement(self, entity: Dict, context: Optional[Dict] = None) -> str:
-        """Generate a replacement value for the entity."""
-        pass
+        """Return a replacement value for the entity."""
 
     def clear_cache(self):
-        """Clear the cache for a new document."""
+        """Drop per-document state."""
         self.cache = {}
-
-    def _get_cached_or_generate(self, cache_key: str, generator_func) -> str:
-        """Get cached value or generate new one."""
-        if cache_key not in self.cache:
-            self.cache[cache_key] = generator_func()
-        return self.cache[cache_key]

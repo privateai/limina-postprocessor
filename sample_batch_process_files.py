@@ -35,11 +35,8 @@ def main():
 
     print(f"Found {len(json_files)} file(s) to process")
 
-    # Initialize processor once (efficient - dictionary loads once)
-    processor = limina_postprocessor.DEIDPostProcessor(
-        name_dictionary_path=limina_postprocessor.DEFAULT_DICTIONARY,
-        enable_names=True
-    )
+    # Initialize processor once; the census name lists load here
+    processor = limina_postprocessor.DEIDPostProcessor()
 
     # Process each file
     processed_count = 0

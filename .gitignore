@@ -4,24 +4,29 @@
 # virtual environments
 .venv
 
-# environment variables
-.env
-
 # python build/runtime artifacts
 __pycache__/
 *.py[cod]
 *.egg-info/
 build/
 dist/
-
-# gender detection API cache (written at runtime when enable_api_gender=True)
-.gender_cache.json
+.pytest_cache/
 
 # editor / tooling local settings
 .claude/
 .vscode/
 .idea/
 
-# sample output folders (generated when running samples)
+# sample output folders (generated when running the sample scripts)
 sample_output/
 sample_output_batch/
+sample_output_threaded_deid/
+
+# local-only: diagrams and the scripts that built the census data. Not shipped to
+# clients, who consume the census JSON rather than regenerating it.
+docs/*
+tools/*
+
+# Famous-name blocklist: 180 MB, over GitHub's 100 MB per-file limit. Kept locally;
+# nothing in the package reads it yet.
+limina_postprocessor/data/famous_names_blocklist.txt

@@ -9,17 +9,17 @@ This script demonstrates the full pipeline at scale:
 4. Verify output quality (indices, honorifics, gender, coreference)
 5. Print summary statistics
 
-Requirements:
-    pip install requests
-
 Setup:
     Run your local DEID container at localhost:8080
+
+No third-party packages required.
 """
 
 import json
 import sys
 import time
-import requests
+import urllib.error
+import urllib.request
 sys.path.insert(0, '.')
 import limina_postprocessor
 from limina_postprocessor.handlers.gender_detector import GenderDetector
@@ -104,11 +104,16 @@ def call_deid_api_batch(texts, batch_size=10):
         }
     }
 
+    request = urllib.request.Request(
+        DEID_API_URL,
+        data=json.dumps(payload).encode(),
+        headers=headers,
+        method='POST',
+    )
     try:
-        response = requests.post(DEID_API_URL, headers=headers, json=payload)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            return json.loads(response.read())
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
         print(f"❌ API Error: {e}")
         return None
 
@@ -217,10 +222,7 @@ def main():
     print("\n📊 Initializing processor...")
     start_time = time.time()
 
-    processor = limina_postprocessor.DEIDPostProcessor(
-        name_dictionary_path=limina_postprocessor.DEFAULT_DICTIONARY,
-        enable_names=True
-    )
+    processor = limina_postprocessor.DEIDPostProcessor()
 
     init_time = time.time() - start_time
     print(f"\n✅ Processor initialized in {init_time:.1f}s")

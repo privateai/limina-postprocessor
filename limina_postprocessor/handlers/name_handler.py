@@ -1,310 +1,164 @@
 #!/usr/bin/env python3
-"""Name entity handler for replacing name entities by sampling parquet row groups."""
+"""Name entity handler: replaces name placeholders with synthetic census names."""
 
-import random
-import pyarrow as pa
-import pyarrow.compute as pc
-import pyarrow.parquet as pq
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
+
+from ..name_pool import NamePool
 from .base_handler import BaseEntityHandler
-from .gender_detector import GenderDetector
+from .gender_detector import (TITLES_LONGEST_FIRST, GenderDetector,
+                              starts_with_title)
+
+# Entity types this handler claims, and which of them want a full name rather than a
+# single component.
+FULL_NAME_TYPES = frozenset({'NAME', 'NAME_MEDICAL_PROFESSIONAL'})
+GIVEN_NAME_TYPES = frozenset({'NAME_GIVEN'})
+FAMILY_NAME_TYPES = frozenset({'NAME_FAMILY'})
+HANDLED_TYPES = FULL_NAME_TYPES | GIVEN_NAME_TYPES | FAMILY_NAME_TYPES
 
 
 class NameHandler(BaseEntityHandler):
-    """Handler for name entity replacement, sampling parquet row groups directly."""
+    """Replaces name entities with synthetic names composed from census data.
 
-    # Columns that make up the value substituted for each entity type, joined with a
-    # space. A full name is assembled from its two components rather than stored: a
-    # materialized full_name column was 80% of the dictionary on disk (3.158 of 3.92
-    # bytes/row) and, being ~13 bytes of text per row instead of a dictionary index,
-    # also cost more to decode than reading both components does.
-    COLUMNS_BY_TYPE = {
-        'NAME': ('first_name', 'last_name'),
-        'NAME_MEDICAL_PROFESSIONAL': ('first_name', 'last_name'),
-        'NAME_GIVEN': ('first_name',),
-        'NAME_FAMILY': ('last_name',),
-    }
+    Holds no state between documents. Within a document it keeps a cache so the same
+    original name always yields the same replacement, including when one document
+    refers to a person by full name in one place and by surname alone in another.
+    """
 
-    # Sampling budget: 100 probes total (as before), but at most 4 row group reads
-    MAX_ROW_GROUP_READS = 4
-    PROBES_PER_ROW_GROUP = 25
+    def __init__(self, census_data_dir: Optional[str] = None,
+                 seed: Optional[int] = None):
+        """Load the name pools.
 
-    def __init__(self, dictionary_path: str, enable_api_gender: bool = False,
-                 census_data_dir: Optional[str] = None):
-        """Initialize name handler with a memory-mapped parquet reader."""
+        `census_data_dir` defaults to the packaged census data. `seed` reproduces a
+        previous run; omitted, the pool seeds itself from the clock.
+        """
         super().__init__()
 
-        # Set default census data path relative to this file
         if census_data_dir is None:
-            package_dir = Path(__file__).parent.parent  # limina_postprocessor/
-            census_data_dir = str(package_dir / "data" / "census_data")
+            census_data_dir = str(Path(__file__).parent.parent / 'data' / 'census_data')
 
-        if not Path(dictionary_path).exists():
-            raise FileNotFoundError(f"Dictionary not found: {dictionary_path}")
+        self.pool = NamePool(census_data_dir, seed=seed)
+        # The detector reads its lookup from the pool, so the two cannot disagree
+        # about a name's gender and the census files are parsed only once.
+        self.gender_detector = GenderDetector(self.pool.first_names)
 
-        # Memory-map the parquet file; row groups are decoded only when sampled
-        self.dictionary_path = dictionary_path
-        self.parquet = pq.ParquetFile(dictionary_path, memory_map=True)
-        self.dictionary_rows = self.parquet.metadata.num_rows
+        # Within-document coreference, keyed on the original name's components and
+        # holding the replacement as (first, surname) rather than a joined string. A
+        # joined string would have to be re-split to recover either half, and
+        # splitting breaks on the six multi-word first names in the census lists
+        # ("Jo Ann", "Maria De Fatima", "Le Roy").
+        self._replacement_for_first: Dict[str, Tuple[str, str]] = {}
+        self._replacement_for_last: Dict[str, Tuple[str, str]] = {}
 
-        # Index row groups by gender from column statistics (metadata only, no scan)
-        self.row_groups = {'male': [], 'female': []}
-        self.mixed_row_groups = set()
-        self._index_row_groups()
-
-        # Initialize gender detector
-        self.gender_detector = GenderDetector(
-            census_data_dir=census_data_dir,
-            enable_api=enable_api_gender
-        )
-
-        # Honorifics, longest first so the longest match wins (see _split_title)
-        self.sorted_titles = sorted(
-            self.gender_detector.male_titles
-            | self.gender_detector.female_titles
-            | self.gender_detector.neutral_titles,
-            key=len,
-            reverse=True
-        )
-
-        # Within-document coreference: smart component matching
-        self.last_name_to_full = {}   # Maps last name → full name (e.g., "Smith" → "John Smith")
-        self.first_name_to_full = {}  # Maps first name → full name (e.g., "John" → "John Smith")
-
-        # Global tracking to ensure NO repeats across documents
-        self.used_names_global = set()  # Track all names used across ALL documents
-
-    def __del__(self):
-        """Close the parquet file handle on cleanup."""
-        if hasattr(self, 'parquet'):
-            self.parquet.close()
-
-    def _index_row_groups(self):
-        """Record which row groups can contain each gender, using parquet statistics."""
-        metadata = self.parquet.metadata
-
-        # Parquet column order need not match ours, so find gender by name
-        gender_col = next(
-            i for i in range(metadata.num_columns)
-            if metadata.row_group(0).column(i).path_in_schema == 'gender'
-        )
-
-        for row_group in range(metadata.num_row_groups):
-            stats = metadata.row_group(row_group).column(gender_col).statistics
-
-            # A single-valued row group needs no filtering; anything else (mixed,
-            # unrecognized, or missing statistics) can hold either gender and is
-            # filtered after reading
-            single = None
-            if stats is not None and stats.min == stats.max:
-                single = self._stat_str(stats.min)
-
-            if single in self.row_groups:
-                self.row_groups[single].append(row_group)
-            else:
-                self.mixed_row_groups.add(row_group)
-                self.row_groups['male'].append(row_group)
-                self.row_groups['female'].append(row_group)
-
-        # An empty pool means no row group was recognized, so every replacement
-        # would fail later inside random.choice(). Fail here instead, with the
-        # values that were actually seen.
-        empty = [gender for gender, groups in self.row_groups.items() if not groups]
-        if empty:
-            sample = metadata.row_group(0).column(gender_col).statistics
-            raise RuntimeError(
-                f"No row groups available for {empty} in {self.dictionary_path}. "
-                f"Expected the 'gender' column to contain 'male'/'female'; row group 0 "
-                f"reported min={getattr(sample, 'min', None)!r} "
-                f"max={getattr(sample, 'max', None)!r} "
-                f"across {metadata.num_row_groups} row groups (pyarrow {pa.__version__})."
-            )
-
-    @staticmethod
-    def _stat_str(value):
-        """Normalize a parquet statistic to str.
-
-        pyarrow returns BYTE_ARRAY statistics as bytes on some versions and str on
-        others, so comparisons against str keys must not depend on which is in use.
-        """
-        return value.decode('utf-8', 'replace') if isinstance(value, bytes) else value
+    @property
+    def seed(self) -> int:
+        """The seed this handler's names were drawn from. Pass it back to replay."""
+        return self.pool.seed
 
     def can_handle(self, entity_type: str) -> bool:
-        """Check if this is a name entity."""
-        return entity_type in ['NAME', 'NAME_GIVEN', 'NAME_FAMILY', 'NAME_MEDICAL_PROFESSIONAL']
+        return entity_type in HANDLED_TYPES
 
     def get_replacement(self, entity: Dict, context: Optional[Dict] = None) -> str:
-        """Get replacement name from parquet via DuckDB with smart caching."""
+        """Return a synthetic replacement for one name entity."""
         entity_type = entity.get('best_label', entity.get('entity_type', ''))
         original_text = entity.get('text', '').strip()
 
-        # Extract title if present
-        title, cleaned_text = self._split_title(original_text)
+        title, name_text = self._split_title(original_text)
 
-        # Check exact cache first
-        cache_key = (entity_type, cleaned_text)
+        cache_key = (entity_type, name_text)
         if cache_key in self.cache:
             replacement = self.cache[cache_key]
         else:
-            # Smart matching: check if we've seen this name component before
-            replacement = self._smart_match(entity_type, cleaned_text)
-            if replacement:
-                self.cache[cache_key] = replacement
-            else:
-                # Generate new replacement from parquet
-                replacement = self._generate_name(entity_type, cleaned_text)
-                self.cache[cache_key] = replacement
+            # Coreference matches on the title-stripped name, but gender detection
+            # gets the original: the honorific is the strongest gender signal there
+            # is, and stripping it first made that tier unreachable.
+            components = (self._match_known_component(name_text)
+                          or self._new_name(original_text))
+            replacement = self._format(entity_type, components)
+            replacement = self._match_capitalization(name_text, replacement)
+            self.cache[cache_key] = replacement
+            self._remember(name_text, components)
 
-                # Cache components for future smart matching
-                self._cache_components(entity_type, cleaned_text, replacement)
+        return f"{title} {replacement}" if title else replacement
 
-        # Add title back if present
-        if title:
-            replacement = f"{title} {replacement}"
+    def clear_cache(self):
+        """Drop per-document state. Called by the processor for each new document."""
+        super().clear_cache()
+        self._replacement_for_first.clear()
+        self._replacement_for_last.clear()
 
-        return replacement
+    # ------------------------------------------------------------------ internals
 
-    def _smart_match(self, entity_type: str, cleaned_text: str) -> Optional[str]:
-        """Try to match against previously seen name components."""
-        is_full_name = entity_type in ['NAME', 'NAME_MEDICAL_PROFESSIONAL']
+    def _new_name(self, name_text: str) -> Tuple[str, str]:
+        """Draw a fresh (first, surname) pair matching the entity's apparent gender."""
+        gender = self.gender_detector.detect_gender(name_text) or self.pool.coin_flip()
+        return self.pool.full_name(gender)
 
-        # Check last name match
-        if cleaned_text in self.last_name_to_full:
-            full_name = self.last_name_to_full[cleaned_text]
-            return full_name if is_full_name else full_name.split()[-1]
+    def _match_known_component(self, name_text: str) -> Optional[Tuple[str, str]]:
+        """Reuse an earlier replacement if this document already named this person.
 
-        # Check first name match
-        if cleaned_text in self.first_name_to_full:
-            full_name = self.first_name_to_full[cleaned_text]
-            return full_name if is_full_name else full_name.split()[0]
+        "Dr. Alice Chen" followed by a bare "Chen" must map to the same synthetic
+        person, so both halves of every replacement are indexed by the original name
+        they stood in for.
 
+        The index is keyed on single words, so a multi-word lookup is also tried
+        word by word. Without that, the match only worked in one direction: a full
+        name followed by a bare surname was caught, but a bare surname followed by
+        the full name was not, and the same person got two synthetic identities.
+        """
+        candidates = [name_text]
+        parts = name_text.split()
+        if len(parts) > 1:
+            candidates += [parts[-1], parts[0]]
+
+        for candidate in candidates:
+            known = (self._replacement_for_last.get(candidate)
+                     or self._replacement_for_first.get(candidate))
+            if known:
+                return known
         return None
 
-    def _cache_components(self, entity_type: str, original_text: str, replacement: str):
-        """Cache name components for future smart matching."""
-        if entity_type not in ['NAME', 'NAME_MEDICAL_PROFESSIONAL']:
-            return
+    def _remember(self, name_text: str, components: Tuple[str, str]):
+        """Index a replacement under the parts of the original name it replaced."""
+        parts = name_text.split()
+        if len(parts) >= 2:
+            self._replacement_for_first[parts[0]] = components
+            self._replacement_for_last[parts[-1]] = components
+        elif parts:
+            self._replacement_for_first[parts[0]] = components
+            self._replacement_for_last[parts[0]] = components
 
-        parts = replacement.split()
-        original_parts = original_text.split()
+    @staticmethod
+    def _format(entity_type: str, components: Tuple[str, str]) -> str:
+        """Render the part of the name the entity type asks for.
 
-        if len(parts) >= 2 and len(original_parts) >= 2:
-            self.last_name_to_full[original_parts[-1]] = replacement
-            self.first_name_to_full[original_parts[0]] = replacement
-
-    def _generate_name(self, entity_type: str, original_text: str) -> str:
-        """Generate replacement name with NO reuse guarantee across documents."""
-        gender = self.gender_detector.detect_gender(original_text)
-
-        # Select gender pool, random choice if unknown
-        if gender in ('male', 'female'):
-            target_gender = gender
-        else:
-            target_gender = 'male' if random.random() < 0.5 else 'female'
-
-        # Only the components we actually use need to be decoded
-        columns = self.COLUMNS_BY_TYPE.get(entity_type, ('first_name', 'last_name'))
-
-        # Keep trying until we find an unused name
-        fallback = None
-        for _ in range(self.MAX_ROW_GROUP_READS):
-            candidates = self._sample_row_group(target_gender, columns)
-            if len(candidates[0]) == 0:
-                continue
-
-            # Probe within the decoded row group before paying for another read
-            for _ in range(min(self.PROBES_PER_ROW_GROUP, len(candidates[0]))):
-                # Join at the probed row, not across the whole row group: at most 25
-                # rows are ever inspected out of ~124K.
-                row = random.randrange(len(candidates[0]))
-                check_name = ' '.join(column[row].as_py() for column in candidates)
-
-                # If not used globally, mark it and use it
-                if check_name not in self.used_names_global:
-                    self.used_names_global.add(check_name)
-                    return self._match_capitalization(original_text, check_name)
-
-                fallback = check_name
-
-        # If we couldn't find unused name in 100 probes (very unlikely), use it anyway
-        # This should never happen with 1.2B names
-        if fallback is None:
-            raise RuntimeError(
-                f"No {target_gender} names available in {self.dictionary_path}"
-            )
-
-        return self._match_capitalization(original_text, fallback)
-
-    def _sample_row_group(self, gender: str, columns: tuple):
-        """Decode one random row group, returning one array per column, for `gender`.
-
-        Row groups that statistics could not resolve to a single gender are filtered
-        after reading. Each such read also teaches us what the row group really holds,
-        and the index is corrected accordingly, so the filtering cost fades as row
-        groups are visited. Never returns an empty result.
+        Every type in HANDLED_TYPES is matched explicitly rather than falling through
+        to a default, so adding a type to that set without deciding how it renders
+        fails here instead of silently producing a full name.
         """
-        other = 'female' if gender == 'male' else 'male'
+        first, surname = components
+        if entity_type in GIVEN_NAME_TYPES:
+            return first
+        if entity_type in FAMILY_NAME_TYPES:
+            return surname
+        if entity_type in FULL_NAME_TYPES:
+            return f"{first} {surname}"
+        raise ValueError(f"no formatting defined for entity type {entity_type!r}")
 
-        while self.row_groups[gender]:
-            row_group = random.choice(self.row_groups[gender])
-
-            if row_group not in self.mixed_row_groups:
-                table = self.parquet.read_row_group(row_group, columns=list(columns))
-                return tuple(table.column(name) for name in columns)
-
-            table = self.parquet.read_row_group(
-                row_group, columns=list(columns) + ['gender']
-            )
-            total_rows = table.num_rows
-            table = table.filter(pc.equal(table.column('gender'), gender))
-
-            if table.num_rows == 0:
-                # Holds none of this gender, so stop offering it for this gender
-                self._drop_row_group(row_group, gender)
-                continue
-
-            if table.num_rows == total_rows:
-                # Holds only this gender, so it never needs filtering again
-                self.mixed_row_groups.discard(row_group)
-                self._drop_row_group(row_group, other)
-
-            return tuple(table.column(name) for name in columns)
-
-        raise RuntimeError(
-            f"No {gender} names available in {self.dictionary_path}"
-        )
-
-    def _drop_row_group(self, row_group: int, gender: str):
-        """Remove a row group from a gender's pool once it is known not to apply."""
-        try:
-            self.row_groups[gender].remove(row_group)
-        except ValueError:
-            pass
-
-    def _split_title(self, name: str) -> tuple:
-        """Split a leading honorific off a name, returning (title, remaining_name).
-
-        A title only matches when whitespace follows it, so names that merely start
-        with a title's letters ("Drew", "Sriram", "Missy") are left intact. Titles
-        are tried longest-first so "Mrs." wins over "Mr" and "Dr." over "Dr".
-        """
+    @staticmethod
+    def _split_title(name: str) -> Tuple[Optional[str], str]:
+        """Split a leading honorific off a name, returning (title, remainder)."""
         name = name.strip()
-        for title in self.sorted_titles:
-            if name.startswith(title) and name[len(title):len(title) + 1].isspace():
+        for title in TITLES_LONGEST_FIRST:
+            if starts_with_title(name, title):
                 return title, name[len(title):].strip()
         return None, name
 
-    def _match_capitalization(self, original: str, replacement: str) -> str:
-        """Match capitalization pattern of original text."""
+    @staticmethod
+    def _match_capitalization(original: str, replacement: str) -> str:
+        """Mirror an all-caps or all-lowercase original."""
         if original.isupper():
             return replacement.upper()
-        elif original.islower():
+        if original.islower():
             return replacement.lower()
         return replacement
-
-    def clear_cache(self):
-        """Clear cache for new document, including smart matching caches."""
-        super().clear_cache()
-        self.last_name_to_full = {}
-        self.first_name_to_full = {}
