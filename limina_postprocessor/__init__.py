@@ -1,7 +1,8 @@
 """Limina Postprocessor - replaces DEID name placeholders with synthetic names.
 
 Names are composed at request time from US Census and Ontario name lists in
-``data/census_data/``; there is no name dictionary to download.
+``data/census_data/``, with famous names excluded by a prebuilt blocklist index.
+There is no name dictionary to download.
 
 Two usage patterns:
 
@@ -17,13 +18,17 @@ Two usage patterns:
            result = processor.process_document(doc)
 """
 
+from typing import Dict, List, Optional, Union
+
 from .processor import DEIDPostProcessor
 
-__version__ = '0.2.0'
+__version__ = '0.3.0'
 __all__ = ['run_postprocessor', 'DEIDPostProcessor']
 
 
-def run_postprocessor(deid_output, census_data_dir=None, seed=None):
+def run_postprocessor(deid_output: Union[Dict, List[Dict]],
+                      census_data_dir: Optional[str] = None,
+                      seed: Optional[int] = None) -> Union[Dict, List[Dict]]:
     """Replace name entities in one DEID document or a list of them.
 
     Builds a processor per call, so the census data is re-read each time. For many

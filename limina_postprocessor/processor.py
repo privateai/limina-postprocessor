@@ -22,13 +22,20 @@ class DEIDPostProcessor:
     """Replaces name entities across one or many DEID documents."""
 
     def __init__(self, census_data_dir: Optional[str] = None,
-                 seed: Optional[int] = None):
+                 seed: Optional[int] = None,
+                 blocklist_index: Optional[str] = None):
         """Load the name data once; reuse the instance across documents.
 
-        `seed` reproduces a previous run. When omitted the handler seeds itself from
-        the clock, and `self.seed` reports what it chose.
+        Pass `seed` to get the same names a previous run produced. Leave it out and
+        the pool picks its own from the clock; either way `self.seed` reports which
+        one is in use.
+
+        `blocklist_index` defaults to the index shipped in `data/`. Pass '' to skip
+        the famous-name check, which lets ~0.24% of replacements land on a real
+        public figure.
         """
-        self.name_handler = NameHandler(census_data_dir=census_data_dir, seed=seed)
+        self.name_handler = NameHandler(census_data_dir=census_data_dir, seed=seed,
+                                        blocklist_index=blocklist_index)
         self.stats = {
             'total_entities': 0,
             'entities_replaced': 0,
@@ -43,11 +50,10 @@ class DEIDPostProcessor:
     def process_document(self, deid_output: Dict) -> Dict:
         """Return a copy of one DEID document with name entities replaced.
 
-        Raises TypeError if handed a list. Previously a list fell through the
-        `'entities' not in deid_output` guard -- which tests list *elements*, not keys
-        -- and was returned with no replacements made at all. Silently emitting
-        un-replaced names is the worst possible failure for this tool, so it is now
-        loud. Use `process_file` or `run_postprocessor` for a list of documents.
+        Raises TypeError on a list -- use `process_file` or `run_postprocessor` for
+        those. The check is loud rather than lenient because the alternative is
+        returning a document with no replacements made, and silently emitting real
+        names is this tool's worst failure.
         """
         if not isinstance(deid_output, dict):
             raise TypeError(
@@ -58,9 +64,9 @@ class DEIDPostProcessor:
 
         self.name_handler.clear_cache()
         # Deep copy, not .copy(): the entity dicts are mutated below (processed_text
-        # and location are rewritten). A shallow copy shares them with the caller, so
-        # the input document was being modified in place and processing it twice gave
-        # different results the second time.
+        # and location are rewritten). A shallow copy would share them with the
+        # caller, modifying the input in place and making a second pass over the same
+        # document return something different.
         processed = deepcopy(deid_output)
 
         entities = processed.get('entities')
@@ -104,7 +110,7 @@ class DEIDPostProcessor:
 
         return processed
 
-    def process_file(self, input_path: str, output_path: str):
+    def process_file(self, input_path: str, output_path: str) -> None:
         """Read a DEID JSON file (one document or a list) and write the result."""
         with open(input_path) as handle:
             data = json.load(handle)
@@ -115,7 +121,7 @@ class DEIDPostProcessor:
         with open(output_path, 'w') as handle:
             json.dump(processed, handle, indent=2)
 
-    def print_statistics(self):
+    def print_statistics(self) -> None:
         """Print what was seen and replaced."""
         total = self.stats['total_entities']
         replaced = self.stats['entities_replaced']
@@ -158,7 +164,7 @@ class DEIDPostProcessor:
         return start, length, entity
 
     @staticmethod
-    def _set_location(entity: Dict, start: int, length: int):
+    def _set_location(entity: Dict, start: int, length: int) -> None:
         """Write back the post-replacement character offsets."""
         location = entity.setdefault('location', {})
         location['stt_idx_processed'] = start
@@ -197,7 +203,8 @@ def main():
     default_output = input_path.parent / f"{input_path.stem}_processed.json"
     output_path = args.output or str(default_output)
 
-    processor = DEIDPostProcessor(census_data_dir=args.census_data, seed=args.seed)
+    processor = DEIDPostProcessor(census_data_dir=args.census_data,
+                                  seed=args.seed)
     processor.process_file(str(input_path), output_path)
     processor.print_statistics()
     print(f"\nWrote {output_path}")

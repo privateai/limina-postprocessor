@@ -11,6 +11,11 @@ NEUTRAL_TITLES = frozenset({'Dr.', 'Dr', 'Prof.', 'Prof'})
 
 ALL_TITLES = MALE_TITLES | FEMALE_TITLES | NEUTRAL_TITLES
 
+# Honorifics that trail a name rather than lead it. They are listed in MALE_TITLES
+# too, but the prefix scan can never match them there, so they only matter when
+# identifying which word of a name is the surname.
+SUFFIX_TITLES = frozenset({'Jr.', 'Jr', 'Sr.', 'Sr', 'III', 'IV'})
+
 
 def _longest_first(titles: Iterable[str]) -> List[str]:
     """Order titles so the longest match wins: "Mrs." before "Mr", "Dr." before "Dr"."""

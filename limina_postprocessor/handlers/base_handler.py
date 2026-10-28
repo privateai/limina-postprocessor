@@ -23,6 +23,6 @@ class BaseEntityHandler(ABC):
     def get_replacement(self, entity: Dict, context: Optional[Dict] = None) -> str:
         """Return a replacement value for the entity."""
 
-    def clear_cache(self):
+    def clear_cache(self) -> None:
         """Drop per-document state."""
         self.cache = {}

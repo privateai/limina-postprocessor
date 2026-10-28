@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Name entity handler: replaces name placeholders with synthetic census names."""
 
-from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
+from ..census_data import DEFAULT_CENSUS_DATA
 from ..name_pool import NamePool
 from .base_handler import BaseEntityHandler
-from .gender_detector import (TITLES_LONGEST_FIRST, GenderDetector,
-                              starts_with_title)
+from .gender_detector import (SUFFIX_TITLES, TITLES_LONGEST_FIRST,
+                              GenderDetector, starts_with_title)
 
 # Entity types this handler claims, and which of them want a full name rather than a
 # single component.
@@ -15,6 +15,19 @@ FULL_NAME_TYPES = frozenset({'NAME', 'NAME_MEDICAL_PROFESSIONAL'})
 GIVEN_NAME_TYPES = frozenset({'NAME_GIVEN'})
 FAMILY_NAME_TYPES = frozenset({'NAME_FAMILY'})
 HANDLED_TYPES = FULL_NAME_TYPES | GIVEN_NAME_TYPES | FAMILY_NAME_TYPES
+
+
+def _name_words(name: str) -> List[str]:
+    """Split a name into words, dropping trailing honorifics.
+
+    The coreference index treats the last word as the surname, so a trailing "Sr"
+    or "III" has to come off first -- otherwise "James Wilson Sr" indexes under "Sr",
+    a later bare "Wilson" misses, and one person gets two synthetic identities.
+    """
+    words = name.split()
+    while len(words) > 1 and words[-1] in SUFFIX_TITLES:
+        words.pop()
+    return words
 
 
 class NameHandler(BaseEntityHandler):
@@ -26,27 +39,29 @@ class NameHandler(BaseEntityHandler):
     """
 
     def __init__(self, census_data_dir: Optional[str] = None,
-                 seed: Optional[int] = None):
-        """Load the name pools.
+                 seed: Optional[int] = None,
+                 blocklist_index: Optional[str] = None):
+        """Load the name pool and the gender detector.
 
-        `census_data_dir` defaults to the packaged census data. `seed` reproduces a
-        previous run; omitted, the pool seeds itself from the clock.
+        `census_data_dir` defaults to the packaged census data and `blocklist_index`
+        to the packaged index.
+
+        Pass `seed` to get the same names a previous run produced. Leave it out and
+        the pool picks its own seed from the clock, so every run differs. Either way
+        `self.seed` reports the seed in use, so a run can be replayed afterwards.
         """
         super().__init__()
 
-        if census_data_dir is None:
-            census_data_dir = str(Path(__file__).parent.parent / 'data' / 'census_data')
-
-        self.pool = NamePool(census_data_dir, seed=seed)
+        self.pool = NamePool(census_data_dir or DEFAULT_CENSUS_DATA, seed=seed,
+                             blocklist_index=blocklist_index)
         # The detector reads its lookup from the pool, so the two cannot disagree
         # about a name's gender and the census files are parsed only once.
         self.gender_detector = GenderDetector(self.pool.first_names)
 
-        # Within-document coreference, keyed on the original name's components and
-        # holding the replacement as (first, surname) rather than a joined string. A
-        # joined string would have to be re-split to recover either half, and
-        # splitting breaks on the six multi-word first names in the census lists
-        # ("Jo Ann", "Maria De Fatima", "Le Roy").
+        # Within-document coreference. Replacements are held as (first, surname)
+        # rather than joined, because recovering a half from a joined name needs a
+        # split, and splitting truncates the six census first names that contain a
+        # space ("Jo Ann", "Maria De Fatima", "Le Roy").
         self._replacement_for_first: Dict[str, Tuple[str, str]] = {}
         self._replacement_for_last: Dict[str, Tuple[str, str]] = {}
 
@@ -81,7 +96,7 @@ class NameHandler(BaseEntityHandler):
 
         return f"{title} {replacement}" if title else replacement
 
-    def clear_cache(self):
+    def clear_cache(self) -> None:
         """Drop per-document state. Called by the processor for each new document."""
         super().clear_cache()
         self._replacement_for_first.clear()
@@ -102,14 +117,12 @@ class NameHandler(BaseEntityHandler):
         they stood in for.
 
         The index is keyed on single words, so a multi-word lookup is also tried
-        word by word. Without that, the match only worked in one direction: a full
-        name followed by a bare surname was caught, but a bare surname followed by
-        the full name was not, and the same person got two synthetic identities.
+        word by word. Matching only the whole string would work in one direction
+        only -- full name then bare surname -- and miss the reverse, giving the same
+        person two synthetic identities.
         """
-        candidates = [name_text]
-        parts = name_text.split()
-        if len(parts) > 1:
-            candidates += [parts[-1], parts[0]]
+        parts = _name_words(name_text)
+        candidates = [name_text] + ([parts[-1], parts[0]] if len(parts) > 1 else [])
 
         for candidate in candidates:
             known = (self._replacement_for_last.get(candidate)
@@ -118,15 +131,13 @@ class NameHandler(BaseEntityHandler):
                 return known
         return None
 
-    def _remember(self, name_text: str, components: Tuple[str, str]):
+    def _remember(self, name_text: str, components: Tuple[str, str]) -> None:
         """Index a replacement under the parts of the original name it replaced."""
-        parts = name_text.split()
-        if len(parts) >= 2:
-            self._replacement_for_first[parts[0]] = components
-            self._replacement_for_last[parts[-1]] = components
-        elif parts:
-            self._replacement_for_first[parts[0]] = components
-            self._replacement_for_last[parts[0]] = components
+        parts = _name_words(name_text)
+        if not parts:
+            return
+        self._replacement_for_first[parts[0]] = components
+        self._replacement_for_last[parts[-1]] = components
 
     @staticmethod
     def _format(entity_type: str, components: Tuple[str, str]) -> str:

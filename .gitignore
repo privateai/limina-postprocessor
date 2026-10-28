@@ -27,6 +27,11 @@ sample_output_threaded_deid/
 docs/*
 tools/*
 
-# Famous-name blocklist: 180 MB, over GitHub's 100 MB per-file limit. Kept locally;
-# nothing in the package reads it yet.
+# Raw famous-name blocklist: 180 MB, over GitHub's 100 MB per-file limit. Kept
+# locally because it is only needed to rebuild data/blocked_pairs.bin, which is the
+# compiled index the package actually loads.
 limina_postprocessor/data/famous_names_blocklist.txt
+
+# Internal test suite. Kept out of the client-facing repo, which ships the package
+# and the samples only.
+tests/*
