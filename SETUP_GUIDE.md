@@ -27,7 +27,7 @@ python3 -c "import limina_postprocessor; print(limina_postprocessor.__version__)
 ```
 
 There is nothing to download and nothing to install beyond the package itself. The
-name data ships in the repo as 8.8 MB of JSON.
+name data ships in the repo: 8.8 MB of census JSON plus an 18.6 MB blocklist index.
 
 ## Run the samples
 
@@ -119,6 +119,18 @@ Pass it back to get identical output:
 ```bash
 python3 -m limina_postprocessor.processor --input in.json --seed 6931694429430834376
 ```
+
+## Famous-name blocklist
+
+Replacements are checked against a blocklist of famous names, so a synthetic name
+never lands on a real public figure. **4,631,292 pairs are blocked**, and the check is
+on by default — there is nothing to configure.
+
+The index ships as `limina_postprocessor/data/blocked_pairs.bin` and needs no setup.
+
+It stores name positions rather than names, so it only works with the census lists it
+was built from. If those are edited it refuses to load rather than silently blocking
+the wrong names — reinstall the package if that happens.
 
 ## Before scaling up
 
