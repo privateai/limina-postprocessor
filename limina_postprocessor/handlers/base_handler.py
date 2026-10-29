@@ -2,27 +2,27 @@
 """Base class for entity handlers."""
 
 from abc import ABC, abstractmethod
-from typing import Dict, Optional
+from typing import Dict
 
 
 class BaseEntityHandler(ABC):
-    """Interface for entity replacement handlers, plus a per-document cache.
-
-    The cache exists so that one original value maps to one replacement throughout a
-    document. The processor calls `clear_cache` before each document.
-    """
+    """Interface for entity replacement handlers, plus a per-document cache."""
 
     def __init__(self):
-        self.cache = {}
+        self.cache: Dict = {}
 
     @abstractmethod
     def can_handle(self, entity_type: str) -> bool:
         """Whether this handler replaces the given entity type."""
 
     @abstractmethod
-    def get_replacement(self, entity: Dict, context: Optional[Dict] = None) -> str:
-        """Return a replacement value for the entity."""
+    def get_replacement(self, entity: Dict) -> str:
+        """Return a replacement for one entity, whose original text is `entity['text']`.
+
+        Write results to `self.cache` so a value that recurs in the document gets the
+        same replacement each time.
+        """
 
     def clear_cache(self) -> None:
-        """Drop per-document state."""
+        """Forget the current document. Override to also clear a subclass's own state."""
         self.cache = {}

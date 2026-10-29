@@ -15,7 +15,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .handlers import NameHandler
+from .handlers import BaseEntityHandler, NameHandler
 
 
 class DEIDPostProcessor:
@@ -36,6 +36,9 @@ class DEIDPostProcessor:
         """
         self.name_handler = NameHandler(census_data_dir=census_data_dir, seed=seed,
                                         blocklist_index=blocklist_index)
+        # Entity types are claimed in order, first match wins. To replace another
+        # type, write a BaseEntityHandler and add it here -- nothing else changes.
+        self.handlers = [self.name_handler]
         self.stats = {
             'total_entities': 0,
             'entities_replaced': 0,
@@ -62,7 +65,8 @@ class DEIDPostProcessor:
                 f"process_file() or run_postprocessor()."
             )
 
-        self.name_handler.clear_cache()
+        for handler in self.handlers:
+            handler.clear_cache()
         # Deep copy, not .copy(): the entity dicts are mutated below (processed_text
         # and location are rewritten). A shallow copy would share them with the
         # caller, modifying the input in place and making a second pass over the same
@@ -90,8 +94,9 @@ class DEIDPostProcessor:
             self.stats['total_entities'] += 1
             self.stats['entity_types'][entity_type] += 1
 
-            if self.name_handler.can_handle(entity_type):
-                replacement = self.name_handler.get_replacement(entity)
+            handler = self._handler_for(entity_type)
+            if handler is not None:
+                replacement = handler.get_replacement(entity)
                 replacements.append((start, length, replacement))
                 entity['processed_text'] = replacement
                 self.stats['entities_replaced'] += 1
@@ -135,6 +140,13 @@ class DEIDPostProcessor:
                 print(f"  {entity_type}: {count:,}")
 
     # ------------------------------------------------------------------ internals
+
+    def _handler_for(self, entity_type: str) -> Optional[BaseEntityHandler]:
+        """The first handler that claims this entity type, or None."""
+        for handler in self.handlers:
+            if handler.can_handle(entity_type):
+                return handler
+        return None
 
     @staticmethod
     def _locate(entity: Dict, full_text: str) -> Optional[Tuple[int, int, Dict]]:

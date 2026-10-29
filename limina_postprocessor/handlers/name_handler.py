@@ -73,7 +73,7 @@ class NameHandler(BaseEntityHandler):
     def can_handle(self, entity_type: str) -> bool:
         return entity_type in HANDLED_TYPES
 
-    def get_replacement(self, entity: Dict, context: Optional[Dict] = None) -> str:
+    def get_replacement(self, entity: Dict) -> str:
         """Return a synthetic replacement for one name entity."""
         entity_type = entity.get('best_label', entity.get('entity_type', ''))
         original_text = entity.get('text', '').strip()

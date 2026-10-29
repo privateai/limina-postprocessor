@@ -25,9 +25,11 @@ def load_first_names(census_data_dir: str) -> Dict[str, List[str]]:
     """Return {gender: [first names]}, each name assigned exactly one gender.
 
     Where a name appears in both census files the higher count wins, and ties go to
-    male. One gender per name is what lets `GenderDetector` resolve every name the
-    pool can emit, and what keeps a full name unique -- a unisex name in both pools
-    could pair with the same surname twice.
+    male.
+
+    One gender per name does two things. It lets `GenderDetector` resolve every name
+    the pool can emit, and it keeps full names unique -- a unisex name sitting in both
+    pools could pair with the same surname twice.
     """
     census_dir = Path(census_data_dir)
 
