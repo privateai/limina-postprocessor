@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "limina-postprocessor"
-version = "0.1.0"
+version = "0.2.0"
 description = "Post-processing for DEID synthetic output with entity replacement"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -24,10 +24,9 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
 ]
 
-dependencies = [
-    "pyarrow>=10.0.0",
-    "requests>=2.28.0",
-]
+# No third-party dependencies: names are composed from the packaged JSON
+# census data using only the standard library.
+dependencies = []
 
 [project.optional-dependencies]
 dev = [
@@ -43,7 +42,4 @@ limina-postprocessor = "limina_postprocessor.processor:main"
 packages = ["limina_postprocessor", "limina_postprocessor.handlers"]
 
 [tool.setuptools.package-data]
-limina_postprocessor = [
-    "data/census_data/*.json",
-    "data/*.parquet",
-]
+limina_postprocessor = ["data/census_data/*.json"]
