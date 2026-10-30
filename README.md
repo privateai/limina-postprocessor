@@ -191,8 +191,8 @@ time. Prefer `DEIDPostProcessor` for more than one document.
 
 ```
 limina_postprocessor/
-├── __init__.py       run_postprocessor, DEIDPostProcessor
-├── processor.py      document walk, offset tracking, CLI
+├── __init__.py       re-exports run_postprocessor, DEIDPostProcessor
+├── processor.py      document walk, offset tracking, run_postprocessor, CLI
 ├── name_pool.py      the seeded draw, with the blocklist check
 ├── blocklist.py      reads the blocklist index
 ├── census_data.py    loads the census name lists
