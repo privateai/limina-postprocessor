@@ -1,301 +1,250 @@
 #!/usr/bin/env python3
-"""
-Post-processor for DEID synthetic output.
+"""Post-processor for DEID output: replaces name placeholders with synthetic names.
 
-Replaces name entities in DEID output with synthetic names from a 1.2B name dictionary
-while preserving:
-- Global uniqueness (no cross-document name reuse)
-- Within-document coreference (same name → same replacement)
-- Gender matching (~70-75% accuracy)
-- Honorifics (Dr., Mr., Mrs., Ms.)
-- Index accuracy (character positions)
+Preserves within-document coreference (one original name maps to one replacement),
+gender, honorifics, and character offsets.
 
-Usage:
-    python3 post_process_deid.py --input deid_output.json --output processed.json
-    python3 post_process_deid.py --input deid_output.json --dictionary custom_dict.parquet
+    python3 -m limina_postprocessor.processor --input deid_output.json
 """
 
 import argparse
 import json
 import sys
-from pathlib import Path
 from collections import Counter
+from copy import deepcopy
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Union
 
-# Import handlers
-from .handlers import NameHandler
-
-def print_section(title):
-    """Print section header."""
-    print(f"\n{'='*70}")
-    print(title)
-    print("="*70)
-
-def check_file_exists(filepath, description):
-    """Check if file exists, exit with error if not."""
-    if not Path(filepath).exists():
-        print(f"❌ Error: {description} not found: {filepath}")
-        sys.exit(1)
+from .handlers import BaseEntityHandler, NameHandler
 
 
 class DEIDPostProcessor:
-    """Post-processes DEID output with synthetic name replacement."""
+    """Replaces name entities across one or many DEID documents."""
 
-    def __init__(self, name_dictionary_path=None, enable_names=True, enable_api_gender=False):
+    def __init__(self, census_data_dir: Optional[str] = None,
+                 seed: Optional[int] = None,
+                 blocklist_index: Optional[str] = None):
+        """Load the name data once; reuse the instance across documents.
+
+        Pass `seed` to get the same names a previous run produced. Leave it out and
+        the pool picks its own from the clock; either way `self.seed` reports which
+        one is in use.
+
+        `blocklist_index` defaults to the index shipped in `data/`. Pass '' to skip
+        the famous-name check, which lets ~0.24% of replacements land on a real
+        public figure.
         """
-        Initialize post-processor with name handler.
-
-        Args:
-            name_dictionary_path: Path to parquet name dictionary (required if enable_names=True)
-            enable_names: Enable name replacement (default: True)
-            enable_api_gender: Enable API fallback for gender detection (default: False, slower)
-        """
-        print_section("INITIALIZING DEID POST-PROCESSOR")
-
-        # Initialize name handler
-        self.handlers = []
-
-        if enable_names:
-            if not name_dictionary_path:
-                raise ValueError("name_dictionary_path required when enable_names=True")
-            self.handlers.append(NameHandler(name_dictionary_path, enable_api_gender=enable_api_gender))
-        else:
-            print("⚠️  Name replacement: DISABLED")
-
-        if not self.handlers:
-            raise ValueError("At least one handler must be enabled")
-
-        # Statistics tracking
+        self.name_handler = NameHandler(census_data_dir=census_data_dir, seed=seed,
+                                        blocklist_index=blocklist_index)
+        # Entity types are claimed in order, first match wins. To replace another
+        # type, write a BaseEntityHandler and add it here -- nothing else changes.
+        self.handlers = [self.name_handler]
         self.stats = {
             'total_entities': 0,
             'entities_replaced': 0,
             'entity_types': Counter(),
-            'replacements_by_handler': Counter(),
         }
 
-    def _build_entity_positions(self, entities, full_text):
-        """Build list of entities with their positions in text, sorted by position."""
-        entities_with_positions = []
-        for entity in entities:
-            # Check for position in multiple formats (support different DEID outputs)
-            pos = None
+    @property
+    def seed(self) -> int:
+        """The seed this run's names were drawn from. Pass it back to replay the run."""
+        return self.name_handler.seed
 
-            # Format 1: Nested location object (Private AI DEID format)
-            if 'location' in entity:
-                location = entity['location']
-                # Prefer stt_idx_processed (position in processed_text with placeholders)
-                pos = location.get('stt_idx_processed') or location.get('stt_idx')
+    def process_document(self, deid_output: Dict) -> Dict:
+        """Return a copy of one DEID document with name entities replaced.
 
-            # Format 2: Direct start_idx on entity
-            if pos is None and 'start_idx' in entity:
-                pos = entity['start_idx']
+        Raises TypeError on a list -- use `process_file` or `run_postprocessor` for
+        those. The check is loud rather than lenient because the alternative is
+        returning a document with no replacements made, and silently emitting real
+        names is this tool's worst failure.
+        """
+        if not isinstance(deid_output, dict):
+            raise TypeError(
+                f"process_document expects a single document dict, got "
+                f"{type(deid_output).__name__}. For a list of documents use "
+                f"process_file() or run_postprocessor()."
+            )
 
-            # Format 3: Try to find by text
-            if pos is None:
-                entity_text = entity.get('processed_text') or entity.get('text', '')
-                if entity_text:
-                    pos = full_text.find(entity_text)
-
-            if pos is not None and pos >= 0:
-                entities_with_positions.append((pos, entity))
-
-        return sorted(entities_with_positions, key=lambda x: x[0])
-
-    def _update_entity_location(self, entity, original_pos, cumulative_offset, new_length):
-        """Update entity location indices after replacement."""
-        location = entity.get('location', {})
-        if not location:
-            location = {}
-            entity['location'] = location
-
-        new_stt_idx = original_pos + cumulative_offset
-        new_end_idx = new_stt_idx + new_length
-
-        location['stt_idx_processed'] = new_stt_idx
-        location['end_idx_processed'] = new_end_idx
-
-    def _apply_replacements(self, text, replacements_with_positions):
-        """Apply replacements by position (safer than string.replace)."""
-        # Sort by position (should already be sorted, but ensure it)
-        replacements_with_positions = sorted(replacements_with_positions, key=lambda x: x[0])
-
-        # Build new text by iterating through positions
-        result = []
-        last_pos = 0
-
-        for pos, length, replacement in replacements_with_positions:
-            # Add text before this entity
-            result.append(text[last_pos:pos])
-            # Add replacement
-            result.append(replacement)
-            # Update position
-            last_pos = pos + length
-
-        # Add remaining text after last entity
-        result.append(text[last_pos:])
-
-        return ''.join(result)
-
-    def process_document(self, deid_output):
-        """Process a single DEID document."""
-        # Clear handler caches for new document
         for handler in self.handlers:
             handler.clear_cache()
+        # Deep copy, not .copy(): the entity dicts are mutated below (processed_text
+        # and location are rewritten). A shallow copy would share them with the
+        # caller, modifying the input in place and making a second pass over the same
+        # document return something different.
+        processed = deepcopy(deid_output)
 
-        processed = deid_output.copy()
-
-        # Check if entities exist
-        if 'entities' not in processed or not processed['entities']:
+        entities = processed.get('entities')
+        if not entities:
             return processed
 
-        # Get the full text (prefer 'text' for input, 'processed_text' for re-processing)
+        # 'processed_text' when re-processing an already-substituted document,
+        # 'text' on first pass.
         full_text = processed.get('processed_text') or processed.get('text', '')
-        entities_with_positions = self._build_entity_positions(processed['entities'], full_text)
 
-        # Track cumulative offset from replacements
-        cumulative_offset = 0
-        replacements_with_positions = []
+        spans = sorted(
+            (span for span in (self._locate(e, full_text) for e in entities) if span),
+            key=lambda span: span[0],
+        )
 
-        for original_pos, entity in entities_with_positions:
+        replacements: List[Tuple[int, int, str]] = []
+        offset = 0
+
+        for start, length, entity in spans:
             entity_type = entity.get('best_label', entity.get('entity_type', ''))
-            old_processed_text = entity.get('processed_text') or entity.get('text', '')
-
-            # Calculate the length of the original text to replace
-            # Check multiple formats for positions
-            original_length = None
-
-            # Format 1: Nested location object
-            if 'location' in entity:
-                location = entity['location']
-                start = location.get('stt_idx_processed') or location.get('stt_idx')
-                end = location.get('end_idx_processed') or location.get('end_idx')
-                if start is not None and end is not None:
-                    original_length = end - start
-
-            # Format 2: Direct indexes on entity
-            if original_length is None and 'start_idx' in entity and 'end_idx' in entity:
-                original_length = entity['end_idx'] - entity['start_idx']
-
-            # Format 3: Use text length as fallback
-            if original_length is None:
-                original_length = len(old_processed_text)
-
             self.stats['total_entities'] += 1
             self.stats['entity_types'][entity_type] += 1
 
-            # Find handler and get replacement
-            handler = self._get_handler_for_entity(entity_type)
-
-            if handler:
-                replacement = handler.get_replacement(entity, context={})
-                replacements_with_positions.append((original_pos, original_length, replacement))
+            handler = self._handler_for(entity_type)
+            if handler is not None:
+                replacement = handler.get_replacement(entity)
+                replacements.append((start, length, replacement))
                 entity['processed_text'] = replacement
-
                 self.stats['entities_replaced'] += 1
-                self.stats['replacements_by_handler'][handler.__class__.__name__] += 1
+                shift = len(replacement) - length
             else:
-                replacement = old_processed_text
+                replacement = entity.get('processed_text') or entity.get('text', '')
+                shift = 0
 
-            # Update entity location indices
-            self._update_entity_location(entity, original_pos, cumulative_offset, len(replacement))
+            # Positioned using the offset accumulated by *earlier* entities, then the
+            # offset grows for the ones that follow.
+            self._set_location(entity, start + offset, len(replacement))
+            offset += shift
 
-            # Update cumulative offset if text length changed
-            if handler:
-                cumulative_offset += (len(replacement) - original_length)
-
-        # Update the full processed_text field using position-based replacement
-        if replacements_with_positions:
-            processed['processed_text'] = self._apply_replacements(full_text, replacements_with_positions)
+        if replacements:
+            processed['processed_text'] = self._apply(full_text, replacements)
 
         return processed
 
-    def _get_handler_for_entity(self, entity_type):
-        """Find the appropriate handler for an entity type."""
+    def process_file(self, input_path: str, output_path: str) -> None:
+        """Read a DEID JSON file (one document or a list) and write the result."""
+        with open(input_path) as handle:
+            data = json.load(handle)
+
+        processed = ([self.process_document(doc) for doc in data]
+                     if isinstance(data, list) else self.process_document(data))
+
+        with open(output_path, 'w') as handle:
+            json.dump(processed, handle, indent=2)
+
+    def print_statistics(self) -> None:
+        """Print what was seen and replaced."""
+        total = self.stats['total_entities']
+        replaced = self.stats['entities_replaced']
+        rate = f" ({replaced / total * 100:.1f}%)" if total else ""
+
+        print(f"\nEntities: {total:,} seen, {replaced:,} replaced{rate}")
+        print(f"Seed:     {self.seed}")
+        if self.stats['entity_types']:
+            print("\nBy type:")
+            for entity_type, count in self.stats['entity_types'].most_common():
+                print(f"  {entity_type}: {count:,}")
+
+    # ------------------------------------------------------------------ internals
+
+    def _handler_for(self, entity_type: str) -> Optional[BaseEntityHandler]:
+        """The first handler that claims this entity type, or None."""
         for handler in self.handlers:
             if handler.can_handle(entity_type):
                 return handler
         return None
 
-    def process_file(self, input_path, output_path):
-        """Process DEID output file."""
-        print(f"\n📄 Processing: {input_path}")
+    @staticmethod
+    def _locate(entity: Dict, full_text: str) -> Optional[Tuple[int, int, Dict]]:
+        """Return (start, length, entity), or None if the entity cannot be placed.
 
-        with open(input_path, 'r') as f:
-            data = json.load(f)
+        Three position formats are accepted because DEID output varies: a nested
+        `location` object, flat `start_idx`/`end_idx`, or neither -- in which case the
+        entity's text is searched for in the document.
+        """
+        location = entity.get('location') or {}
+        start = location.get('stt_idx_processed') or location.get('stt_idx')
+        end = location.get('end_idx_processed') or location.get('end_idx')
 
-        # Handle both single document and array of documents
-        processed = [self.process_document(doc) for doc in data] if isinstance(data, list) else self.process_document(data)
+        if start is None:
+            start, end = entity.get('start_idx'), entity.get('end_idx')
 
-        with open(output_path, 'w') as f:
-            json.dump(processed, f, indent=2)
+        text = entity.get('processed_text') or entity.get('text', '')
+        if start is None:
+            if not text:
+                return None
+            start, end = full_text.find(text), None
 
-        print(f"✅ Saved to: {output_path}")
+        if start is None or start < 0:
+            return None
 
-    def print_statistics(self):
-        """Print processing statistics."""
-        print_section("PROCESSING STATISTICS")
+        length = end - start if end is not None else len(text)
+        return start, length, entity
 
-        total = self.stats['total_entities']
-        replaced = self.stats['entities_replaced']
+    @staticmethod
+    def _set_location(entity: Dict, start: int, length: int) -> None:
+        """Write back the post-replacement character offsets."""
+        location = entity.setdefault('location', {})
+        location['stt_idx_processed'] = start
+        location['end_idx_processed'] = start + length
 
-        print(f"\n📊 Overall:")
-        print(f"   Total entities: {total:,} | Replaced: {replaced:,}", end='')
-        if total > 0:
-            print(f" | Rate: {replaced / total * 100:.1f}%")
-        else:
-            print()
+    @staticmethod
+    def _apply(text: str, replacements: List[Tuple[int, int, str]]) -> str:
+        """Splice replacements into `text` by position, lowest first."""
+        pieces = []
+        cursor = 0
+        for start, length, replacement in replacements:
+            pieces.append(text[cursor:start])
+            pieces.append(replacement)
+            cursor = start + length
+        pieces.append(text[cursor:])
+        return ''.join(pieces)
 
-        if self.stats['entity_types']:
-            print(f"\n🏷️  Entity Types:")
-            for entity_type, count in self.stats['entity_types'].most_common():
-                print(f"   {entity_type}: {count:,}")
 
-        if self.stats['replacements_by_handler']:
-            print(f"\n🔧 Replacements by Handler:")
-            for handler_name, count in self.stats['replacements_by_handler'].most_common():
-                print(f"   {handler_name}: {count:,}")
+def run_postprocessor(deid_output: Union[Dict, List[Dict]],
+                      census_data_dir: Optional[str] = None,
+                      seed: Optional[int] = None) -> Union[Dict, List[Dict]]:
+    """Replace name entities in one DEID document or a list of them.
 
-        print(f"\n✅ Post-processing complete!")
+    Builds a processor per call, so the census data is re-read each time. For many
+    documents, construct a `DEIDPostProcessor` once and call `process_document`.
+
+    Args:
+        deid_output: DEID JSON output -- a single document or a list of them.
+        census_data_dir: Override the packaged census data directory.
+        seed: Reproduce a previous run. Omitted, names are seeded from the clock.
+
+    Returns:
+        The processed document, or a list of them, matching the input shape.
+    """
+    processor = DEIDPostProcessor(census_data_dir=census_data_dir, seed=seed)
+
+    if isinstance(deid_output, list):
+        return [processor.process_document(doc) for doc in deid_output]
+    return processor.process_document(deid_output)
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Post-process DEID output with synthetic name replacement')
-    parser.add_argument('--input', required=True, help='Path to DEID JSON output file')
-    parser.add_argument('--output', help='Path to save processed output (default: input_processed.json)')
-    parser.add_argument('--dictionary', default='limina_postprocessor/data/name_dictionary_1b_filtered.parquet',
-                        help='Path to name dictionary (default: %(default)s)')
-    parser.add_argument('--no-names', action='store_true', help='Disable name replacement')
-    parser.add_argument('--enable-api-gender', action='store_true',
-                        help='Enable API fallback for gender detection (slower)')
+    parser = argparse.ArgumentParser(
+        description='Replace name entities in DEID output with synthetic names.')
+    parser.add_argument('--input', required=True, help='DEID JSON output file')
+    parser.add_argument('--output', help='Where to write the result '
+                                         '(default: <input>_processed.json)')
+    parser.add_argument('--census-data',
+                        help='Override the packaged census data directory')
+    parser.add_argument('--seed', type=int,
+                        help='Reproduce a previous run (default: seed from the clock)')
     args = parser.parse_args()
 
-    # Default output path
-    if not args.output:
-        input_path = Path(args.input)
-        args.output = str(input_path.parent / f"{input_path.stem}_processed.json")
+    input_path = Path(args.input)
+    if not input_path.exists():
+        print(f"Input file not found: {input_path}", file=sys.stderr)
+        return 1
 
-    # Validate files
-    check_file_exists(args.input, "Input file")
-    if not args.no_names:
-        if not Path(args.dictionary).exists():
-            print(f"❌ Error: Dictionary not found: {args.dictionary}")
-            print("   (Use --no-names to disable name replacement)")
-            sys.exit(1)
+    default_output = input_path.parent / f"{input_path.stem}_processed.json"
+    output_path = args.output or str(default_output)
 
-    print_section("DEID POST-PROCESSOR")
-
-    # Initialize processor
-    processor = DEIDPostProcessor(
-        name_dictionary_path=args.dictionary if not args.no_names else None,
-        enable_names=not args.no_names,
-        enable_api_gender=args.enable_api_gender
-    )
-
-    # Process file
-    processor.process_file(args.input, args.output)
-
-    # Print statistics
+    processor = DEIDPostProcessor(census_data_dir=args.census_data,
+                                  seed=args.seed)
+    processor.process_file(str(input_path), output_path)
     processor.print_statistics()
+    print(f"\nWrote {output_path}")
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
