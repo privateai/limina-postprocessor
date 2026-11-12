@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "limina-postprocessor"
-version = "0.2.0"
+version = "0.4.0"
 description = "Post-processing for DEID synthetic output with entity replacement"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -42,4 +42,7 @@ limina-postprocessor = "limina_postprocessor.processor:main"
 packages = ["limina_postprocessor", "limina_postprocessor.handlers"]
 
 [tool.setuptools.package-data]
-limina_postprocessor = ["data/census_data/*.json"]
+# blocked_pairs.bin is required at runtime -- NamePool refuses to construct without
+# it. famous_names_blocklist.txt is deliberately left out: it is a 189 MB build input
+# for scripts/build_blocklist.py, and nothing in the package reads it.
+limina_postprocessor = ["data/census_data/*.json", "data/blocked_pairs.bin"]
