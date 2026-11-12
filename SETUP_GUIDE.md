@@ -27,7 +27,7 @@ python3 -c "import limina_postprocessor; print(limina_postprocessor.__version__)
 ```
 
 There is nothing to download and nothing to install beyond the package itself. The
-name data ships in the repo: 8.8 MB of census JSON plus an 18.6 MB blocklist index.
+name data ships in the repo: 0.5 MB of census JSON plus a 22.2 MB blocklist index.
 
 ## Run the samples
 
@@ -123,22 +123,23 @@ python3 -m limina_postprocessor.processor --input in.json --seed 693169442943083
 ## Famous-name blocklist
 
 Replacements are checked against a blocklist of famous names, so a synthetic name
-never lands on a real public figure. **4,631,292 pairs are blocked**, and the check is
-on by default — there is nothing to configure.
+never lands on a real public figure. The index holds **5,194,418 pairs**, of which
+**1,592,941 apply** to the names currently installed; the rest name people the current
+lists cannot spell. The check is on by default — there is nothing to configure.
 
 The index ships as `limina_postprocessor/data/blocked_pairs.bin` and needs no setup.
 
-It stores name positions rather than names, so it only works with the census lists it
-was built from. If those are edited it refuses to load rather than silently blocking
-the wrong names — reinstall the package if that happens.
+It stores names rather than census positions, so editing the census data does not
+invalidate it and no rebuild is needed. Trim the name lists and the names that remain
+keep exactly the protection they had.
 
 ## Before scaling up
 
 - **Names are not unique across documents.** The processor keeps no state between
-  documents, so a name can recur. The full-name pool is ~1.95 billion, but
-  `NAME_GIVEN` draws from 12,018 and `NAME_FAMILY` from 162,251, and those repeat
+  documents, so a name can recur. The full-name pool is ~18.7 million, but
+  `NAME_GIVEN` draws from 3,148 and `NAME_FAMILY` from 6,456, and those repeat
   quickly. Tell us your expected volume per entity type if this matters.
-- **Memory is flat**, about 91 MB, regardless of how many names are issued.
+- **Memory is flat**, about 103 MB, regardless of how many names are issued.
 - **Entity types other than names are not replaced.** Dates, addresses and IDs pass
   through as the DEID container left them.
 

@@ -62,14 +62,17 @@ Every other entity type — dates, addresses, IDs — passes through untouched.
 
 | | |
 |---|---|
-| First names | 12,018 (5,591 male / 6,427 female) |
-| Surnames | 162,251 |
-| **Distinct full names reachable** | **1,945,301,226** |
-| On disk | 27.3 MB |
+| First names | 3,148 (1,098 male / 2,050 female) |
+| Surnames | 6,456 |
+| **Distinct full names reachable** | **18,730,547** |
+| On disk | 6.3 MB |
 
 First names are the US Census lists plus Ontario birth registrations (1917–2024,
-OGL-ON 1.0); surnames are US Census. A name is composed from the two lists on each
-request rather than stored, which is why 1.9 billion of them fit in 27 MB.
+OGL-ON 1.0); surnames are US Census. Both have been cut down to the names cleared by
+triage, and carry the triage spelling where it restores punctuation the Census
+flattened — `O'Brien` for `Obrien`, `Alvarez-Cruz` for `Alvarezcruz`. A name is
+composed from the two lists on each request rather than stored, which is why 18.8
+million of them fit in 6.3 MB.
 
 Each first name belongs to exactly one gender pool, so a replacement always matches
 the gender the detector found.
@@ -121,8 +124,15 @@ Omit it and the seed comes from the clock, so each run differs.
 ## Famous-name blocklist
 
 Replacements are checked so a synthetic name never lands on a real public figure.
-**4,631,292 pairs are blocked.** The check is on by default and needs no setup — the
-index ships as `data/blocked_pairs.bin`.
+The index holds **5,194,418 pairs** — every famous pairing the census lists have ever
+been able to produce — of which **1,592,941 apply** to the names currently installed.
+The check is on by default and needs no setup; the index ships as
+`data/blocked_pairs.bin` (22.2 MB).
+
+It is keyed on names, not census positions, so **editing the census data does not
+invalidate it**. Names that stay keep their protection, names that come back get
+theirs back, and nothing needs rebuilding unless the famous-name list itself
+changes.
 
 To run without it, only sensible if you filter elsewhere:
 
@@ -130,7 +140,9 @@ To run without it, only sensible if you filter elsewhere:
 limina_postprocessor.DEIDPostProcessor(blocklist_index='')
 ```
 
-That lets famous names through on **0.24% of replacements**, roughly 1 in 417.
+That lets famous names through on **8.7% of replacements**, roughly 1 in 11. The
+rate is this high because the triaged name lists keep the common names, which are
+the ones public figures have.
 
 ---
 
@@ -142,14 +154,16 @@ repeats one issued earlier:
 
 | names issued | duplicate rate |
 |---|---|
-| 1 M | 0.03% |
-| 10 M | 0.26% |
-| 100 M | 2.52% |
+| 10 k | 0.03% |
+| 100 k | 0.27% |
+| 1 M | 2.61% |
+| 10 M | 22.44% |
 
-`NAME_GIVEN` and `NAME_FAMILY` repeat far sooner, because their pools are the 12,018
-first names and 162,251 surnames rather than the full 1.9 billion combinations — and
-a `NAME_GIVEN` draw only sees the matching gender's half. Replacing 6,000 distinct
-first names yields **20.8%** collisions; 6,000 surnames, **1.75%**.
+`NAME_GIVEN` and `NAME_FAMILY` repeat far sooner, because their pools are the 3,148
+first names and 6,456 surnames rather than the full 18.8 million combinations — and
+a `NAME_GIVEN` draw only sees the matching gender's half (2,050 female, 1,098 male).
+Replacing 1,000 distinct first names yields **20.8%** collisions; 1,000 surnames,
+**7.4%**.
 
 No pool size fixes that: it is a property of the entity type. If cross-document
 uniqueness matters at your volume, tell us before scaling.
@@ -160,11 +174,11 @@ Single process, measured on the sample corpus:
 
 | | |
 |---|---|
-| Import + init | 73 ms |
-| Per name entity | 9.9 µs |
-| Per document (~5 entities) | 0.051 ms |
-| Throughput | **19,474 documents/sec** |
-| Memory | **126 MB, flat** |
+| Import + init | 24 ms |
+| Per name entity | 6.9 µs |
+| Per document (~5 entities) | 0.057 ms |
+| Throughput | **17,961 documents/sec** |
+| Memory | **103 MB, flat** |
 
 Memory does not grow with the number of names issued — verified flat from startup
 through 500,000 replacements.
@@ -222,8 +236,6 @@ rewritten; any other index fields are left as the DEID container set them.
 **`blocklist index not found`** — `data/blocked_pairs.bin` ships with the package, so
 the install is incomplete. Reinstall, or pass `blocklist_index=''`.
 
-**`does not match the census data in this package`** — the census JSON was edited
-after the index was built, so the positions it stores no longer line up. Reinstall.
 
 ---
 
