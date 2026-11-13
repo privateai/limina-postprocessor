@@ -2,12 +2,11 @@
 """Synthetic name source: US Census and Ontario name lists, paired at request time.
 
 A name is composed per request from ``data/census_data/``: one first name from the
-pool matching the target gender, one surname. That reaches 12,018 x 162,251 =
-1,949,932,518 pairs, of which 4,631,292 are blocked as famous names, leaving
-**1,945,301,226** reachable -- without storing any of them.
+pool matching the target gender, one surname. The blocklist holds
+5,194,418 pairs in all.
 
-Pairing two names from lists already in memory takes ~0.9us. This approach
-stays flat at ~126 MB RAM.
+Pairing two names from lists already in memory takes ~1.2us, and a whole
+replacement ~6.9us. This approach stays flat at ~103 MB RAM.
 
 Pre-computing only pays off when looking the answer up is cheaper than working it
 out. Here, working it out is the cheap part.
@@ -19,7 +18,7 @@ import time
 from pathlib import Path
 from typing import Optional, Tuple
 
-from .blocklist import DEFAULT_INDEX, Blocklist, fingerprint
+from .blocklist import DEFAULT_INDEX, Blocklist
 from .census_data import GENDERS, load_first_names, load_surnames
 
 
@@ -52,8 +51,7 @@ class NamePool:
         `self.seed` reports which one is in use.
 
         `blocklist_index` defaults to the index shipped in `data/`. Pass '' to run
-        without blocking, which lets famous names through -- measured at 0.24% of
-        draws, roughly 1 in 417.
+        without blocking, which lets famous names through.
         """
         self.first_names = load_first_names(census_data_dir)
         self.surnames = load_surnames(census_data_dir)
@@ -71,15 +69,14 @@ class NamePool:
                 f"this install is incomplete -- reinstall it, or pass "
                 f"blocklist_index='' to run without the famous-name check."
             )
-        return Blocklist.load(str(path),
-                              fingerprint(self.first_names, self.surnames))
+        return Blocklist.load(str(path), self.first_names, self.surnames)
 
     @property
     def size(self) -> int:
         """Distinct full names reachable, after blocking."""
         combinations = (sum(len(n) for n in self.first_names.values())
                         * len(self.surnames))
-        return combinations - self.blocklist.size
+        return combinations - self.blocklist.applicable
 
     def coin_flip(self) -> str:
         """Pick a gender, for entities whose gender could not be determined."""
@@ -89,8 +86,8 @@ class NamePool:
         """Draw a (first name, surname) pair for `gender`, redrawing if blocked.
 
         Drawing by position rather than with `random.choice` is what makes the
-        blocklist check possible -- it is keyed on positions, not strings. Only 0.24%
-        of pairs are blocked, so the loop almost never runs twice.
+        blocklist check possible -- it is keyed on positions, not strings. 7.8% of
+        pairs are blocked, so the loop occasionally runs twice and rarely more.
 
         The halves are returned separately so callers never re-split a joined name,
         which would truncate the six census first names containing a space.

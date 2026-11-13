@@ -31,7 +31,7 @@ class DEIDPostProcessor:
         one is in use.
 
         `blocklist_index` defaults to the index shipped in `data/`. Pass '' to skip
-        the famous-name check, which lets ~0.24% of replacements land on a real
+        the famous-name check, which lets ~8.7% of replacements land on a real
         public figure.
         """
         self.name_handler = NameHandler(census_data_dir=census_data_dir, seed=seed,
